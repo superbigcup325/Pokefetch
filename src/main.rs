@@ -1,6 +1,13 @@
 // pokefetch —— 随机/指定打印宝可梦字符画
-// 素材编译期内嵌：build.rs 扫描 assets/ 生成 static SPRITES（key = "size/variant/name"）
-include!(concat!(env!("OUT_DIR"), "/sprites_gen.rs"));
+// 素材编译期内嵌：build.rs 编码 + 压缩生成 OUT_DIR/sprites.bin（key 排序，运行时二分）
+// 编解码核心见 codec.rs（build.rs 与运行时共用）
+mod codec;
+
+static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
+
+use std::io::Read;
+
+use ruzstd::decoding::StreamingDecoder;
 
 const NAMES_TXT: &str = include_str!("../assets/names.txt");
 
@@ -54,16 +61,46 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn print_pokemon(name: &str, shiny: bool, big: bool, title: bool) {
+/// 启动时解析 blob 索引：key 按构建期排序，供二分查找
+fn sprites_index() -> Vec<(&'static str, usize, usize)> {
+    let n = u32::from_le_bytes(BLOB[..4].try_into().unwrap()) as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut pos = 4;
+    for _ in 0..n {
+        let klen = BLOB[pos] as usize;
+        let key = std::str::from_utf8(&BLOB[pos + 1..pos + 1 + klen]).unwrap();
+        let coff = u32::from_le_bytes(BLOB[pos + 1 + klen..pos + 5 + klen].try_into().unwrap())
+            as usize;
+        let clen =
+            u32::from_le_bytes(BLOB[pos + 5 + klen..pos + 9 + klen].try_into().unwrap()) as usize;
+        out.push((key, coff, clen));
+        pos += 1 + klen + 8;
+    }
+    let frames_start = pos; // 帧区紧跟索引区；coff 以帧区起点为 0
+    out.iter_mut().for_each(|(_, coff, _)| *coff += frames_start);
+    out
+}
+
+fn print_pokemon(index: &[(&'static str, usize, usize)], name: &str, shiny: bool, big: bool, title: bool) {
     let size = if big { "large" } else { "small" };
     let variant = if shiny { "shiny" } else { "regular" };
     let key = format!("{size}/{variant}/{name}");
-    match SPRITES.binary_search_by(|(k, _)| (*k).cmp(key.as_str())) {
+    match index.binary_search_by(|(k, _, _)| (*k).cmp(key.as_str())) {
         Ok(i) => {
+            let (_, coff, clen) = index[i];
+            let frame = &BLOB[coff..coff + clen];
+            let mut decoder = StreamingDecoder::new(frame)
+                .unwrap_or_else(|e| die(&format!("内部错误: 解码器初始化失败: {e}")));
+            let mut encoded = Vec::new();
+            decoder
+                .read_to_end(&mut encoded)
+                .unwrap_or_else(|e| die(&format!("内部错误: 解码失败: {e}")));
+            let mut ansi = String::new();
+            codec::decode_and_render(&encoded, &mut ansi);
             if title {
                 println!("{name}{}", if shiny { " (shiny)" } else { "" });
             }
-            print!("{}", SPRITES[i].1);
+            print!("{ansi}");
         }
         Err(_) => die(&format!(
             "没有这只宝可梦: {name}（pokefetch -l 查列表，形态直接传全名如 charizard-mega-x）"
@@ -164,5 +201,6 @@ fn main() {
         name.unwrap()
     };
 
-    print_pokemon(&chosen, shiny, big, title);
+    let index = sprites_index();
+    print_pokemon(&index, &chosen, shiny, big, title);
 }

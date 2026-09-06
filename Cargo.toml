@@ -3,3 +3,16 @@ name = "pokefetch"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+
+[dependencies]
+ruzstd = "0.9"
+
+[build-dependencies]
+ruzstd = "0.9"
+
+# build.rs 全量编码 5316 个素材 + round-trip 断言，别让它跑在无优化档
+[profile.dev.build-override]
+opt-level = 2
+
+[profile.release.build-override]
+opt-level = 2
