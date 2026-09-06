@@ -81,7 +81,8 @@ fn sprites_index() -> Vec<(&'static str, usize, usize)> {
     out
 }
 
-fn print_pokemon(index: &[(&'static str, usize, usize)], name: &str, shiny: bool, big: bool, title: bool) {
+/// 取一只精灵的 ANSI 文本（未命中即 die）
+fn sprite_ansi(index: &[(&'static str, usize, usize)], name: &str, shiny: bool, big: bool) -> String {
     let size = if big { "large" } else { "small" };
     let variant = if shiny { "shiny" } else { "regular" };
     let key = format!("{size}/{variant}/{name}");
@@ -97,10 +98,7 @@ fn print_pokemon(index: &[(&'static str, usize, usize)], name: &str, shiny: bool
                 .unwrap_or_else(|e| die(&format!("内部错误: 解码失败: {e}")));
             let mut ansi = String::new();
             codec::decode_and_render(&encoded, &mut ansi);
-            if title {
-                println!("{name}{}", if shiny { " (shiny)" } else { "" });
-            }
-            print!("{ansi}");
+            ansi
         }
         Err(_) => die(&format!(
             "没有这只宝可梦: {name}（pokefetch -l 查列表，形态直接传全名如 charizard-mega-x）"
@@ -137,6 +135,13 @@ fn help() -> ! {
   -b, --big            大尺寸字符画（默认 small）
       --no-title       不显示名字行
   -l, --list           列出全部名字
+
+fastfetch 对接:
+      --raw            只输出字符画本体（无名字行），可作 logo 源:
+                       fastfetch --data-raw \"$(pokefetch -r --raw)\"
+  -o, --output <文件>  字符画写入文件（stdout 不输出）
+      --logo-cache     写入 ~/.cache/pokefetch/logo.ans 并照常打印；
+                       配合仓库附带的 fastfetch.jsonc 使用（fastfetch --config）
   -h, --help           本帮助
 "
     );
@@ -152,6 +157,8 @@ fn main() {
     let mut title = true;
     let mut random = false;
     let mut gens: Option<String> = None;
+    let mut output: Option<std::path::PathBuf> = None;
+    let mut logo_cache = false;
 
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -178,6 +185,15 @@ fn main() {
             "-s" | "--shiny" => shiny = true,
             "-b" | "--big" => big = true,
             "--no-title" => title = false,
+            "--raw" => title = false,
+            "-o" | "--output" => match it.next() {
+                Some(v) => output = Some(std::path::PathBuf::from(v)),
+                None => die("-o 需要一个文件路径"),
+            },
+            "--logo-cache" => {
+                output = Some(cache_logo_path());
+                logo_cache = true;
+            }
             other => die(&format!("未知参数: {other}（-h 看用法）")),
         }
     }
@@ -202,5 +218,40 @@ fn main() {
     };
 
     let index = sprites_index();
-    print_pokemon(&index, &chosen, shiny, big, title);
+    let ansi = sprite_ansi(&index, &chosen, shiny, big);
+
+    match &output {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| die(&format!("建目录 {parent:?} 失败: {e}")));
+            }
+            std::fs::write(path, &ansi)
+                .unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
+            if logo_cache {
+                // 缓存模式照常打印，让用户知道这次抽到了谁
+                if title {
+                    println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
+                }
+                print!("{ansi}");
+            }
+        }
+        None => {
+            if title {
+                println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
+            }
+            print!("{ansi}");
+        }
+    }
+}
+
+/// 默认 logo 缓存路径：$XDG_CACHE_HOME/pokefetch/logo.ans
+fn cache_logo_path() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| die("HOME 未设置"));
+            std::path::PathBuf::from(home).join(".cache")
+        });
+    base.join("pokefetch").join("logo.ans")
 }

@@ -16,6 +16,19 @@ pokefetch -r 1-3       # 1~3 代随机
 pokefetch -s -b        # 闪光 + 大图
 ```
 
+## 接入 fastfetch
+
+```
+# 方式一：stdout 管道，零状态
+fastfetch --data-raw "$(pokefetch -r --raw)"
+
+# 方式二：缓存 + 随附 preset（每次 fetch 换精灵）
+pokefetch -r --logo-cache && fastfetch --config fastfetch.jsonc
+```
+
+`--logo-cache` 把字符画写到 `~/.cache/pokefetch/logo.ans`（XDG_CACHE_HOME 感知），
+preset 内的 logo 路径即指向它；`-o/--output <文件>` 可写入任意路径。
+
 ## 构建
 
 ```
