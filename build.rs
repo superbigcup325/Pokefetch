@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 
 // 注意：ruzstd 0.9 编码器只实现了 Uncompressed/Fastest 两档（更高档 unimplemented!()）
 const LEVEL: CompressionLevel = CompressionLevel::Fastest;

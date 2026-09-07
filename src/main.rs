@@ -77,15 +77,14 @@ fn sprites_index() -> Vec<Entry<'static>> {
         let klen = BLOB[pos] as usize;
         let key = std::str::from_utf8(&BLOB[pos + 1..pos + 1 + klen]).unwrap();
         let dims = pos + 1 + klen; // rows u8 | cols u8
-        let coff =
-            u32::from_le_bytes(BLOB[dims + 2..dims + 6].try_into().unwrap()) as usize;
-        let clen =
-            u32::from_le_bytes(BLOB[dims + 6..dims + 10].try_into().unwrap()) as usize;
+        let coff = u32::from_le_bytes(BLOB[dims + 2..dims + 6].try_into().unwrap()) as usize;
+        let clen = u32::from_le_bytes(BLOB[dims + 6..dims + 10].try_into().unwrap()) as usize;
         out.push((key, BLOB[dims + 1] as usize, coff, clen));
         pos = dims + 10;
     }
     let frames_start = pos; // 帧区紧跟索引区；coff 以帧区起点为 0
-    out.iter_mut().for_each(|(_, _, coff, _)| *coff += frames_start);
+    out.iter_mut()
+        .for_each(|(_, _, coff, _)| *coff += frames_start);
     out
 }
 
@@ -185,12 +184,20 @@ fn terminal_size() -> Option<(usize, usize)> {
     }
     const TIOCGWINSZ: u64 = 0x5413;
     let query = |fd: i32| unsafe {
-        let mut ws = Winsize { rows: 0, cols: 0, xpix: 0, ypix: 0 };
-        ((ioctl(fd, TIOCGWINSZ, &mut ws) == 0) && ws.rows > 0 && ws.cols > 0)
-            .then(|| (ws.rows as usize, ws.cols as usize))
+        let mut ws = Winsize {
+            rows: 0,
+            cols: 0,
+            xpix: 0,
+            ypix: 0,
+        };
+        if ioctl(fd, TIOCGWINSZ, &mut ws) == 0 && ws.rows > 0 && ws.cols > 0 {
+            Some((usize::from(ws.rows), usize::from(ws.cols)))
+        } else {
+            None
+        }
     };
     unsafe {
-        let fd = open(b"/dev/tty\0".as_ptr() as *const _, 2 /* O_RDWR */);
+        let fd = open(c"/dev/tty".as_ptr(), 2 /* O_RDWR */);
         if fd >= 0 {
             let size = query(fd);
             close(fd);
@@ -312,35 +319,38 @@ fn main() {
     let term = if adapt { terminal_size() } else { None };
 
     let mut rng = Rng::new();
-    let chosen: String = if random || name.is_none() {
-        // shiny 先定（分布与顺序无关），池子按该变体的宽度过滤才有意义
-        if !shiny {
-            shiny = rng.next_u64() % SHINY_RATE == 0;
-        }
-        let size = if big { "large" } else { "small" };
-        let variant = if shiny { "shiny" } else { "regular" };
-        let (lo, hi) = match &gens {
-            Some(spec) => {
-                let ranges = parse_gens(spec);
-                ranges[rng.below(ranges.len())]
+    let chosen: String = match name {
+        // 显式 -n 且未要求随机：直接用
+        Some(n) if !random => n,
+        // 随机路径（无 -n，或 -r 覆盖显式名字）
+        _ => {
+            // shiny 先定（分布与顺序无关），池子按该变体的宽度过滤才有意义
+            if !shiny {
+                shiny = rng.next_u64().is_multiple_of(SHINY_RATE);
             }
-            None => (1, names().len()),
-        };
-        let mut pool: Vec<&'static str> = names()[lo - 1..hi].to_vec();
-        // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
-        if let Some((_, cols)) = term {
-            let fits: Vec<&'static str> = pool
-                .iter()
-                .copied()
-                .filter(|n| sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols))
-                .collect();
-            if !fits.is_empty() {
-                pool = fits;
+            let size = if big { "large" } else { "small" };
+            let variant = if shiny { "shiny" } else { "regular" };
+            let (lo, hi) = match &gens {
+                Some(spec) => {
+                    let ranges = parse_gens(spec);
+                    ranges[rng.below(ranges.len())]
+                }
+                None => (1, names().len()),
+            };
+            let mut pool: Vec<&'static str> = names()[lo - 1..hi].to_vec();
+            // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
+            if let Some((_, cols)) = term {
+                let fits: Vec<&'static str> = pool
+                    .iter()
+                    .copied()
+                    .filter(|n| sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols))
+                    .collect();
+                if !fits.is_empty() {
+                    pool = fits;
+                }
             }
+            pool[rng.below(pool.len())].to_owned()
         }
-        pool[rng.below(pool.len())].to_owned()
-    } else {
-        name.unwrap()
     };
 
     let ansi = sprite_ansi(&index, &chosen, shiny, big);
@@ -361,7 +371,11 @@ fn main() {
             }
         }
     };
-    let ansi = if canvas_w > 0 { pad_canvas(&ansi, canvas_w) } else { ansi };
+    let ansi = if canvas_w > 0 {
+        pad_canvas(&ansi, canvas_w)
+    } else {
+        ansi
+    };
 
     match &output {
         Some(path) => {
@@ -369,8 +383,7 @@ fn main() {
                 std::fs::create_dir_all(parent)
                     .unwrap_or_else(|e| die(&format!("建目录 {parent:?} 失败: {e}")));
             }
-            std::fs::write(path, &ansi)
-                .unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
+            std::fs::write(path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
             if logo_cache {
                 // 缓存模式照常打印，让用户知道这次抽到了谁
                 if title {

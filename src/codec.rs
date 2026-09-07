@@ -43,10 +43,11 @@ pub fn semantic_eq(a: &Sprite, b: &Sprite) -> bool {
 
 /// 解析原始 ANSI 文本；非法输入 panic（msg 由调用方附上文件名）
 pub fn parse_ansi(text: &str) -> Sprite {
+    type RawCell = (Option<Color>, Option<Color>, u8);
     let mut fg = None::<Color>;
     let mut bg = None::<Color>;
-    let mut rows: Vec<Vec<(Option<Color>, Option<Color>, u8)>> = Vec::new();
-    let mut row: Vec<(Option<Color>, Option<Color>, u8)> = Vec::new();
+    let mut rows: Vec<Vec<RawCell>> = Vec::new();
+    let mut row: Vec<RawCell> = Vec::new();
 
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -82,10 +83,11 @@ pub fn parse_ansi(text: &str) -> Sprite {
             }
             _ => {
                 let ch = text[i..].chars().next().unwrap();
-                let g = GLYPHS.iter().position(|&c| c == ch).unwrap_or_else(|| {
-                    panic!("字形封闭集之外的字符: {ch:?} (U+{:04X})", ch as u32)
-                }) as u8;
-                row.push((fg, bg, g as u8));
+                let g =
+                    GLYPHS.iter().position(|&c| c == ch).unwrap_or_else(|| {
+                        panic!("字形封闭集之外的字符: {ch:?} (U+{:04X})", ch as u32)
+                    }) as u8;
+                row.push((fg, bg, g));
                 i += ch.len_utf8();
             }
         }
@@ -100,7 +102,10 @@ pub fn parse_ansi(text: &str) -> Sprite {
 
     let mut pal: Vec<Color> = Vec::new();
     let mut rev: std::collections::HashMap<Color, u16> = std::collections::HashMap::new();
-    let idx = |c: Option<Color>, pal: &mut Vec<Color>, rev: &mut std::collections::HashMap<Color, u16>| -> u16 {
+    let idx = |c: Option<Color>,
+               pal: &mut Vec<Color>,
+               rev: &mut std::collections::HashMap<Color, u16>|
+     -> u16 {
         match c {
             None => 0,
             Some(c) => *rev.entry(c).or_insert_with(|| {
@@ -114,7 +119,7 @@ pub fn parse_ansi(text: &str) -> Sprite {
         for (f, b, g) in r {
             cells.push((idx(*f, &mut pal, &mut rev), idx(*b, &mut pal, &mut rev), *g));
         }
-        cells.extend(std::iter::repeat((0u16, 0u16, 0u8)).take(cols - r.len()));
+        cells.extend(std::iter::repeat_n((0u16, 0u16, 0u8), cols - r.len()));
     }
 
     Sprite {
@@ -137,7 +142,8 @@ pub fn encode(s: &Sprite) -> Vec<u8> {
     assert!(s.rows <= u8::MAX as usize && s.cols <= u8::MAX as usize);
     assert!(s.pal.len() < u16::MAX as usize);
     let wide = s.pal.len() > 255;
-    let mut out = Vec::with_capacity(5 + s.pal.len() * 3 + s.cells.len() * if wide { 5 } else { 3 });
+    let mut out =
+        Vec::with_capacity(5 + s.pal.len() * 3 + s.cells.len() * if wide { 5 } else { 3 });
     out.push(s.rows as u8);
     out.push(s.cols as u8);
     out.push(wide as u8);
@@ -184,8 +190,11 @@ pub fn decode_and_render(data: &[u8], out: &mut String) {
     let cols = r.u8() as usize;
     let wide = r.u8() != 0;
     let n_pal = r.u16le() as usize;
-    let pal: Vec<Color> = r.take(n_pal * 3)
-        .chunks_exact(3)
+    let pal: Vec<Color> = r
+        .take(n_pal * 3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| (c[0], c[1], c[2]))
         .collect();
 
@@ -206,9 +215,17 @@ pub fn decode_and_render(data: &[u8], out: &mut String) {
     for _row in 0..rows {
         for _col in 0..cols {
             let (f, b, g) = if wide {
-                (cells.u16le() as usize, cells.u16le() as usize, cells.u8() as usize)
+                (
+                    cells.u16le() as usize,
+                    cells.u16le() as usize,
+                    cells.u8() as usize,
+                )
             } else {
-                (cells.u8() as usize, cells.u8() as usize, cells.u8() as usize)
+                (
+                    cells.u8() as usize,
+                    cells.u8() as usize,
+                    cells.u8() as usize,
+                )
             };
             // 透明/换色语义与 parse 侧对称：只在状态变化处发 SGR；
             // 清掉仅剩的一路颜色只能整体 reset
