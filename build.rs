@@ -20,7 +20,7 @@ fn main() {
     let assets = manifest_dir.join("assets/colorscripts");
     println!("cargo:rerun-if-changed=assets/colorscripts");
 
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut entries: Vec<(String, Vec<u8>, u8, u8)> = Vec::new();
     for size in ["small", "large"] {
         for variant in ["regular", "shiny"] {
             let dir = assets.join(size).join(variant);
@@ -39,33 +39,36 @@ fn main() {
                 );
                 let text = fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("读文件 {path:?} 失败: {e}"));
-                let encoded = encode_file(&key, &text);
-                entries.push((key, encoded));
+                let (encoded, rows, cols) = encode_file(&key, &text);
+                entries.push((key, encoded, rows, cols));
             }
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     // 组 blob：索引区（预留，回头回填偏移）+ 帧区；帧内偏移以帧区起点为 0
+    // 索引条目：klen | key | rows u8 | cols u8 | coff u32le | clen u32le
     let mut blob = Vec::new();
     blob.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     let mut index_size = 4usize;
-    for (key, _) in &entries {
-        index_size += 1 + key.len() + 8;
+    for (key, _, _, _) in &entries {
+        index_size += 1 + key.len() + 10;
     }
     blob.resize(index_size, 0);
     let mut slot = 4usize; // 当前条目在索引区的位置
-    for (key, encoded) in &entries {
+    for (key, encoded, rows, cols) in &entries {
         let frame = compress_to_vec(encoded.as_slice(), LEVEL);
         verify_frame(key, &frame, encoded);
         let coff = (blob.len() - index_size) as u32;
         let clen = frame.len() as u32;
         blob.extend_from_slice(&frame);
-        let slot_end = slot + 1 + key.len() + 8;
+        let slot_end = slot + 1 + key.len() + 10;
         blob[slot] = key.len() as u8;
         blob[slot + 1..slot + 1 + key.len()].copy_from_slice(key.as_bytes());
-        blob[slot + 1 + key.len()..slot + 5 + key.len()].copy_from_slice(&coff.to_le_bytes());
-        blob[slot + 5 + key.len()..slot_end].copy_from_slice(&clen.to_le_bytes());
+        blob[slot + 1 + key.len()] = *rows;
+        blob[slot + 2 + key.len()] = *cols;
+        blob[slot + 3 + key.len()..slot + 7 + key.len()].copy_from_slice(&coff.to_le_bytes());
+        blob[slot + 7 + key.len()..slot_end].copy_from_slice(&clen.to_le_bytes());
         slot = slot_end;
     }
 
@@ -74,13 +77,13 @@ fn main() {
     eprintln!(
         "pokefetch build: {} 只 × 2 尺寸 × 2 变体，编码 {:.1}MB → 压缩 {:.1}MB",
         entries.len() / 4,
-        entries.iter().map(|(_, e)| e.len()).sum::<usize>() as f64 / 1e6,
+        entries.iter().map(|(_, e, _, _)| e.len()).sum::<usize>() as f64 / 1e6,
         blob.len() as f64 / 1e6
     );
 }
 
-/// 单文件：编码 + round-trip 断言（build 期正确性闸门）
-fn encode_file(key: &str, text: &str) -> Vec<u8> {
+/// 单文件：编码 + round-trip 断言（build 期正确性闸门），返回编码字节与可见尺寸
+fn encode_file(key: &str, text: &str) -> (Vec<u8>, u8, u8) {
     let sprite = std::panic::catch_unwind(|| codec::parse_ansi(text))
         .unwrap_or_else(|p| panic!("{key}: 解析失败: {}", panic_msg(p)));
     let mut rendered = String::new();
@@ -91,7 +94,8 @@ fn encode_file(key: &str, text: &str) -> Vec<u8> {
         codec::semantic_eq(&sprite, &re),
         "{key}: round-trip 语义不一致"
     );
-    codec::encode(&sprite)
+    let encoded = codec::encode(&sprite);
+    (encoded, sprite.rows as u8, sprite.cols as u8)
 }
 
 /// 单帧解压回比：编码字节必须无损
