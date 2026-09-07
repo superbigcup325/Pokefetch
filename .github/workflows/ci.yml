@@ -1,0 +1,39 @@
+# 最小 CI：Linux-only 工具，单平台单 job 即可
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 格式检查
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: 构建
+        run: cargo build --locked
+
+      - name: 测试
+        run: cargo test --locked
+
+      # 核心冒烟：指定打印（产物落盘校验非空）+ 随机一次（CI 无 tty，覆盖默认画布路径）
+      - name: 冒烟
+        run: |
+          cargo run --locked -- -n pikachu --raw -o /tmp/out.ans
+          test -s /tmp/out.ans
+          cargo run --locked -- -r > /dev/null
