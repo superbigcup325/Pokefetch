@@ -29,8 +29,9 @@ pokefetch -r --logo-cache && fastfetch --config fastfetch.jsonc
 `--logo-cache` 把字符画写到 `~/.cache/pokefetch/logo.ans`（XDG_CACHE_HOME 感知），
 preset 内的 logo 路径即指向它；`-o/--output <文件>` 可写入任意路径。
 
-输出按左锚画布右垫（small 默认 40 列，`--canvas <列宽>` 可调、0 关闭；large 不垫），
-fastfetch 面板列位由此稳定。随机时自动跳过当前终端放不下的精灵；
+输出按画布右垫（small 默认 40 列，`--canvas <列宽>` 可调、0 关闭；large 不垫），
+fastfetch 面板列位由此稳定；`--center` 可让精灵在画布内居中（默认左锚）。
+随机时自动跳过当前终端放不下的精灵；
 显式 `-n`/`-b` 完全按指定输出、不做干预。
 
 ## 构建

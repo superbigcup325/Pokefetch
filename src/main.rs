@@ -150,6 +150,7 @@ fn help() -> ! {
   -s, --shiny          强制闪光版（不带时随机有 1/128 概率出 shiny）
   -b, --big            大尺寸字符画（默认 small）
       --canvas <列宽>  画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
+      --center         精灵在画布内居中（默认左锚）
       --no-title       不显示名字行
   -l, --list           列出全部名字
 
@@ -227,15 +228,26 @@ fn visible_width(line: &str) -> usize {
     w
 }
 
-/// 左锚画布：每行右垫空格到画布宽（fastfetch 面板列位由此稳定）；
-/// 行宽已达画布的行不动（精灵超宽时自然伸出，永不裁剪）
-fn pad_canvas(ansi: &str, w: usize) -> String {
+/// 画布：精灵整体在画布内左锚或居中，每行右垫空格到画布宽
+/// （fastfetch 面板列位由此稳定）；行宽已达画布的行不动（精灵超宽时自然伸出，永不裁剪）。
+/// 居中按精灵整体最大宽计算统一左偏移，逐行对齐不被打散
+fn pad_canvas(ansi: &str, w: usize, center: bool) -> String {
+    let max_w = ansi.lines().map(visible_width).max().unwrap_or(0);
+    let left = if center {
+        w.saturating_sub(max_w) / 2
+    } else {
+        0
+    };
     let mut out = String::with_capacity(ansi.len() + 16);
     for line in ansi.lines() {
-        out.push_str(line);
         let lw = visible_width(line);
-        if lw < w {
-            out.push_str(&" ".repeat(w - lw));
+        if left > 0 {
+            out.push_str(&" ".repeat(left));
+        }
+        out.push_str(line);
+        let used = left + lw;
+        if used < w {
+            out.push_str(&" ".repeat(w - used));
         }
         out.push('\n');
     }
@@ -265,6 +277,7 @@ fn main() {
     let mut output: Option<std::path::PathBuf> = None;
     let mut logo_cache = false;
     let mut canvas: Option<usize> = None;
+    let mut center = false;
 
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -297,6 +310,7 @@ fn main() {
                 },
                 None => die("--canvas 需要一个列宽"),
             },
+            "--center" => center = true,
             "--no-title" => title = false,
             "--raw" => title = false,
             "-o" | "--output" => match it.next() {
@@ -372,7 +386,7 @@ fn main() {
         }
     };
     let ansi = if canvas_w > 0 {
-        pad_canvas(&ansi, canvas_w)
+        pad_canvas(&ansi, canvas_w, center)
     } else {
         ansi
     };
@@ -413,18 +427,26 @@ mod tests {
 
     #[test]
     fn pad_left_anchors_right_pad() {
-        assert_eq!(pad_canvas("█\n██\n", 4), "█   \n██  \n");
+        assert_eq!(pad_canvas("█\n██\n", 4, false), "█   \n██  \n");
+    }
+
+    #[test]
+    fn pad_centers_with_uniform_offset() {
+        // 精灵最大宽 2，画布 5：统一左偏移 1，逐行右垫到 5
+        assert_eq!(pad_canvas("█\n██\n", 5, true), " █   \n ██  \n");
     }
 
     #[test]
     fn pad_skips_wide_lines() {
         // 行宽已达画布：不垫（精灵超宽自然伸出）
-        assert_eq!(pad_canvas("████\n", 2), "████\n");
+        assert_eq!(pad_canvas("████\n", 2, false), "████\n");
+        assert_eq!(pad_canvas("████\n", 2, true), "████\n");
     }
 
     #[test]
     fn pad_zero_is_noop() {
-        assert_eq!(pad_canvas("█\n", 0), "█\n");
+        assert_eq!(pad_canvas("█\n", 0, false), "█\n");
+        assert_eq!(pad_canvas("█\n", 0, true), "█\n");
     }
 
     #[test]
