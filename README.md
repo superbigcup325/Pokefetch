@@ -29,6 +29,9 @@ pokefetch -r --logo-cache && fastfetch --config fastfetch.jsonc
 `--logo-cache` 把字符画写到 `~/.cache/pokefetch/logo.ans`（XDG_CACHE_HOME 感知），
 preset 内的 logo 路径即指向它；`-o/--output <文件>` 可写入任意路径。
 
+输出按固定画布居中（small 26×52 / large 52×104），并统一适配终端：画布随终端收窄、
+large 放不下自动降级 small，任何窗口下字符画不折行、fastfetch 面板列位稳定。
+
 ## 构建
 
 ```
