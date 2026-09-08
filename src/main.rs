@@ -189,7 +189,7 @@ fn terminal_size() -> Option<(usize, usize)> {
     unsafe extern "C" {
         fn open(path: *const std::os::raw::c_char, flags: i32) -> i32;
         fn close(fd: i32) -> i32;
-        fn ioctl(fd: i32, request: u64, arg: *mut Winsize) -> i32;
+        fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
     }
     const TIOCGWINSZ: u64 = 0x5413;
     let query = |fd: i32| unsafe {
@@ -199,7 +199,14 @@ fn terminal_size() -> Option<(usize, usize)> {
             xpix: 0,
             ypix: 0,
         };
-        if ioctl(fd, TIOCGWINSZ, &mut ws) == 0 && ws.rows > 0 && ws.cols > 0 {
+        if ioctl(
+            fd,
+            TIOCGWINSZ,
+            &mut ws as *mut Winsize as *mut std::ffi::c_void,
+        ) == 0
+            && ws.rows > 0
+            && ws.cols > 0
+        {
             Some((usize::from(ws.rows), usize::from(ws.cols)))
         } else {
             None
