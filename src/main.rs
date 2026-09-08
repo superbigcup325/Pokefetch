@@ -7,8 +7,12 @@ mod sysinfo;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 
+// -f/--form 的形态表：build.rs 从 assets/pokemon.json 生成
+include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
+
 use std::io::Read;
 
+use clap::{CommandFactory, FromArgMatches, Parser};
 use ruzstd::decoding::StreamingDecoder;
 
 const NAMES_TXT: &str = include_str!("../assets/names.txt");
@@ -157,50 +161,134 @@ fn module_help_lines(width: usize) -> Vec<String> {
     lines
 }
 
-fn help() -> ! {
-    let mod_lines = module_help_lines(55)
+/// 帮助尾部的动态段：fastfetch 对接 + 模块清单（注册表派生）+ 适配说明
+fn help_tail() -> String {
+    let mod_lines = module_help_lines(72)
         .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            if i == 0 {
-                format!("                       可用: {l}")
-            } else {
-                format!("                             {l}")
-            }
-        })
+        .map(|l| format!("  {l}"))
         .collect::<Vec<_>>()
         .join("\n");
-    eprint!(
-        "pokefetch —— 终端里的宝可梦
+    format!(
+        "fastfetch 对接:
+  --raw          只输出字符画本体（无名字行无面板）:
+                 fastfetch --data-raw \"$(pokefetch -r --raw)\"
+  -o, --output   字符画写入文件（stdout 不输出）
+  --logo-cache   写入 ~/.cache/pokefetch/logo.ans 并照常打印；
+                 配合仓库附带的 fastfetch.jsonc 使用（fastfetch --config）
 
-用法: pokefetch [选项]
-
-  -n, --name <名字>    指定宝可梦（pikachu；形态传全名 charizard-mega-x）
-  -r, --random [世代]  随机一只，可选世代: 1 / 1-3 / 1,3,6
-  -s, --shiny          强制闪光版（不带时随机有 1/128 概率出 shiny）
-  -b, --big            大尺寸字符画（默认 small）
-      --canvas <列宽>  画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
-      --center         精灵在画布内居中（默认左锚）
-      --no-panel       只输出精灵，不带系统信息面板
-      --modules <列表> 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
+面板模块 (--modules 可选):
 {mod_lines}
-      --title          显示精灵名字行（面板模式下默认不显示）
-      --no-title       不显示名字行（纯精灵模式下默认显示）
-  -l, --list           列出全部名字
-
-fastfetch 对接:
-      --raw            只输出字符画本体（无名字行无面板），可作 logo 源:
-                       fastfetch --data-raw \"$(pokefetch -r --raw)\"
-  -o, --output <文件>  字符画写入文件（stdout 不输出）
-      --logo-cache     写入 ~/.cache/pokefetch/logo.ans 并照常打印；
-                       配合仓库附带的 fastfetch.jsonc 使用（fastfetch --config）
 
 随机时自动跳过当前终端放不下的精灵；显式 -n/-b 不做干预、原样输出。
-面板信息来自 /proc、/sys 与环境变量，取不到的行自动跳过。
-  -h, --help           本帮助
-"
-    );
-    std::process::exit(0);
+面板信息来自 /proc、/sys 与环境变量，取不到的行自动跳过。"
+    )
+}
+
+#[derive(Parser)]
+#[command(
+    name = "pokefetch",
+    about = "终端里的宝可梦 fetch：精灵字符画 + 系统信息面板"
+)]
+struct Args {
+    /// 指定宝可梦（pikachu；形态配 -f，或直接传全名 charizard-mega-x）
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// 随机一只，可附加世代: 1 / 1-3 / 1,3,6
+    #[arg(short, long, num_args(0..=1), default_missing_value = "")]
+    random: Option<String>,
+
+    /// 从逗号分隔的名字列表中随机（如 pikachu,gengar）
+    #[arg(
+        long,
+        value_name = "列表",
+        conflicts_with_all = ["name", "random"]
+    )]
+    random_by_names: Option<String>,
+
+    /// 指定形态（-l 查名字，形态见 assets/pokemon.json，如 mega-x；需配 -n）
+    #[arg(short = 'f', long, requires = "name")]
+    form: Option<String>,
+
+    /// 强制闪光版（不带时随机有 1/128 概率出 shiny）
+    #[arg(short, long)]
+    shiny: bool,
+
+    /// 大尺寸字符画（默认 small）
+    #[arg(short, long)]
+    big: bool,
+
+    /// 画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
+    #[arg(long, value_name = "列宽")]
+    canvas: Option<usize>,
+
+    /// 精灵在画布内居中（默认左锚）
+    #[arg(long)]
+    center: bool,
+
+    /// 只输出精灵，不带系统信息面板
+    #[arg(long)]
+    no_panel: bool,
+
+    /// 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
+    #[arg(long, value_name = "列表")]
+    modules: Option<String>,
+
+    /// 显示精灵名字行（面板模式下默认不显示）
+    #[arg(long, conflicts_with = "no_title")]
+    title: bool,
+
+    /// 不显示名字行（纯精灵模式下默认显示）
+    #[arg(long)]
+    no_title: bool,
+
+    /// 只输出字符画本体（无名字行无面板），作 fastfetch logo 源
+    #[arg(long)]
+    raw: bool,
+
+    /// 字符画写入文件（stdout 不输出）
+    #[arg(short, long, value_name = "文件")]
+    output: Option<std::path::PathBuf>,
+
+    /// 写入 ~/.cache/pokefetch/logo.ans 并照常打印
+    #[arg(long)]
+    logo_cache: bool,
+
+    /// 列出全部名字
+    #[arg(short, long)]
+    list: bool,
+}
+
+/// -f/--form：校验形态存在，拼出素材名（regular 即本名）
+fn resolve_form(name: &str, form: &str) -> String {
+    let Some(forms) = FORMS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f) else {
+        die(&format!("{name} 不在形态表中"));
+    };
+    if !forms.contains(&form) {
+        die(&format!(
+            "{name} 没有形态 {form}（可用: {}）",
+            forms.join(", ")
+        ));
+    }
+    if form == "regular" {
+        name.to_string()
+    } else {
+        format!("{name}-{form}")
+    }
+}
+
+/// 图鉴编号 = names.txt 行号（1-based）；形态名回退到基础名
+/// （charizard-mega-x → charizard；ho-oh / porygon-z 这类原生带连字符的不受影响）
+fn dex_number(name: &str) -> Option<usize> {
+    let all = names();
+    let mut cur = name;
+    loop {
+        if let Some(i) = all.iter().position(|&n| n == cur) {
+            return Some(i + 1);
+        }
+        let (base, _) = cur.rsplit_once('-')?;
+        cur = base;
+    }
 }
 
 /// 行的可见宽度（字形均单宽；跳过 \x1b[..m 转义段）
@@ -269,86 +357,77 @@ enum Dest {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = Args::command().after_help(help_tail()).get_matches();
+    let args = Args::from_arg_matches(&args).unwrap();
 
-    let mut name: Option<String> = None;
-    let mut shiny = false;
-    let mut big = false;
-    let mut title: Option<bool> = None; // None = 按模式取默认（面板模式隐藏，纯精灵显示）
-    let mut random = false;
-    let mut gens: Option<String> = None;
-    let mut output: Option<std::path::PathBuf> = None;
-    let mut logo_cache = false;
-    let mut canvas: Option<usize> = None;
-    let mut center = false;
-    let mut no_panel = false;
-    let mut raw = false;
-    let mut modules: Option<Vec<String>> = None;
-
-    let mut it = args.iter().peekable();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-h" | "--help" => help(),
-            "-l" | "--list" => {
-                for n in names() {
-                    println!("{n}");
-                }
-                return;
-            }
-            "-n" | "--name" => match it.next() {
-                Some(v) => name = Some(v.clone()),
-                None => die("-n 需要一个名字"),
-            },
-            "-r" | "--random" => {
-                random = true;
-                if let Some(v) =
-                    it.next_if(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                {
-                    gens = Some(v.clone());
-                }
-            }
-            "-s" | "--shiny" => shiny = true,
-            "-b" | "--big" => big = true,
-            "--canvas" => match it.next() {
-                Some(v) => match v.parse::<usize>() {
-                    Ok(n) if n <= 1000 => canvas = Some(n),
-                    _ => die("--canvas 需要一个 0~1000 的整数"),
-                },
-                None => die("--canvas 需要一个列宽"),
-            },
-            "--center" => center = true,
-            "--title" => title = Some(true),
-            "--no-title" => title = Some(false),
-            "--no-panel" => no_panel = true,
-            "--modules" => match it.next() {
-                Some(v) => {
-                    let list: Vec<String> = v
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if list.is_empty() {
-                        die("--modules 需要模块列表，如 os,gpu,memory");
-                    }
-                    modules = Some(list);
-                }
-                None => die("--modules 需要模块列表，如 os,gpu,memory"),
-            },
-            "--raw" => raw = true,
-            "-o" | "--output" => match it.next() {
-                Some(v) => output = Some(std::path::PathBuf::from(v)),
-                None => die("-o 需要一个文件路径"),
-            },
-            "--logo-cache" => {
-                output = Some(cache_logo_path());
-                logo_cache = true;
-            }
-            other => die(&format!("未知参数: {other}（-h 看用法）")),
+    if args.list {
+        for n in names() {
+            println!("{n}");
         }
+        return;
     }
+    if args.canvas.is_some_and(|c| c > 1000) {
+        die("--canvas 需要一个 0~1000 的整数");
+    }
+
+    let Args {
+        name,
+        random,
+        random_by_names,
+        form,
+        mut shiny,
+        big,
+        canvas,
+        center,
+        no_panel,
+        modules,
+        title,
+        no_title,
+        raw,
+        output,
+        logo_cache,
+        list: _,
+    } = args;
+
+    let title = if no_title {
+        Some(false)
+    } else if title {
+        Some(true)
+    } else {
+        None
+    };
+    // -r 不带值时 default_missing_value 为空串
+    let random_given = random.is_some();
+    let gens = match random.as_deref() {
+        Some("") | None => None,
+        Some(spec) => Some(spec.to_string()),
+    };
+    let by_names: Option<Vec<&str>> = random_by_names.as_deref().map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let modules: Option<Vec<String>> = modules.map(|s| {
+        let list: Vec<String> = s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if list.is_empty() {
+            die("--modules 需要模块列表，如 os,gpu,memory");
+        }
+        list
+    });
 
     let index = sprites_index();
 
+    // --logo-cache 写缓存路径（显式 -o 优先）；echo 让用户看到抽到了谁
+    let output = if logo_cache {
+        Some(output.unwrap_or_else(cache_logo_path))
+    } else {
+        output
+    };
     let dest = match output {
         Some(path) => Dest::File {
             path,
@@ -369,8 +448,11 @@ fn main() {
 
     let mut rng = Rng::new();
     let chosen: String = match name {
-        // 显式 -n 且未要求随机：直接用
-        Some(n) if !random => n,
+        // 显式 -n 且未要求随机：直接用（-f 拼形态）
+        Some(n) if !random_given => match &form {
+            Some(f) => resolve_form(&n, f),
+            None => n,
+        },
         // 随机路径（无 -n，或 -r 覆盖显式名字）
         _ => {
             // shiny 先定（分布与顺序无关），池子按该变体的宽度过滤才有意义
@@ -380,14 +462,26 @@ fn main() {
             let size = if big { "large" } else { "small" };
             let variant = if shiny { "shiny" } else { "regular" };
             let all = names();
-            let (lo, hi) = match &gens {
-                Some(spec) => {
-                    let ranges = parse_gens(spec);
-                    ranges[rng.below(ranges.len())]
+            let mut pool: Vec<&'static str> = if let Some(list) = &by_names {
+                for n in list {
+                    if !all.contains(n) {
+                        die(&format!("没有这只宝可梦: {n}"));
+                    }
                 }
-                None => (1, all.len()),
+                list.iter()
+                    .map(|n| all.iter().find(|a| *a == n).unwrap())
+                    .copied()
+                    .collect()
+            } else {
+                let (lo, hi) = match &gens {
+                    Some(spec) => {
+                        let ranges = parse_gens(spec);
+                        ranges[rng.below(ranges.len())]
+                    }
+                    None => (1, all.len()),
+                };
+                all[lo - 1..hi].to_vec()
             };
-            let mut pool: Vec<&'static str> = all[lo - 1..hi].to_vec();
             // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
             if let Some((_, cols)) = term {
                 let fits: Vec<&'static str> = pool
@@ -441,8 +535,13 @@ fn main() {
             let body = if panel {
                 let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
                 let info = sysinfo::collect(&names);
+                let mut rows = panel_rows(&info);
+                // 图鉴编号行：names.txt 行号即编号，紧跟分隔线
+                if let Some(num) = dex_number(&chosen) {
+                    rows.insert(2, format!("\x1b[1;34mDex:\x1b[0m #{num:03}"));
+                }
                 let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
-                compose(&ansi, panel_rows(&info), sprite_w, 3)
+                compose(&ansi, rows, sprite_w, 3)
             } else {
                 ansi
             };
@@ -607,5 +706,22 @@ mod tests {
         assert!(rows[4].starts_with("\x1b[40m   "));
         assert!(rows[4].ends_with("\x1b[m"));
         assert!(rows[5].starts_with("\x1b[5m\x1b[100m   "));
+    }
+}
+
+#[cfg(test)]
+mod dex_tests {
+    use super::*;
+
+    #[test]
+    fn dex_numbers() {
+        assert_eq!(dex_number("pikachu"), Some(25));
+        assert_eq!(dex_number("charizard"), Some(6));
+        // 形态回退基础名
+        assert_eq!(dex_number("charizard-mega-x"), Some(6));
+        // 原生带连字符的名字直接命中，不被误拆
+        assert_eq!(dex_number("ho-oh"), Some(250));
+        assert_eq!(dex_number("porygon-z"), Some(474));
+        assert_eq!(dex_number("不存在"), None);
     }
 }

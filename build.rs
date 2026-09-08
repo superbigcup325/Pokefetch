@@ -15,10 +15,52 @@ use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 // 注意：ruzstd 0.9 编码器只实现了 Uncompressed/Fastest 两档（更高档 unimplemented!()）
 const LEVEL: CompressionLevel = CompressionLevel::Fastest;
 
+/// assets/pokemon.json → OUT_DIR/forms_gen.rs 的 static FORMS（name → forms），
+/// 供 -f/--form 校验；JSON 只在构建期解析，运行时零开销
+fn gen_forms_table(manifest_dir: &Path) {
+    println!("cargo:rerun-if-changed=assets/pokemon.json");
+    let path = manifest_dir.join("assets/pokemon.json");
+    let data: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|e| panic!("读 {} 失败: {e}", path.display())),
+    )
+    .unwrap_or_else(|e| panic!("解析 pokemon.json 失败: {e}"));
+    let arr = data
+        .as_array()
+        .unwrap_or_else(|| panic!("pokemon.json 顶层不是数组"));
+
+    let mut out = String::from(
+        "// 由 build.rs 从 assets/pokemon.json 生成，勿手改\nstatic FORMS: &[(&str, &[&str])] = &[\n",
+    );
+    for item in arr {
+        let name = item["name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("pokemon.json 条目缺 name"));
+        let forms = item["forms"]
+            .as_array()
+            .unwrap_or_else(|| panic!("pokemon.json 条目 {name} 缺 forms"))
+            .iter()
+            .map(|f| {
+                f.as_str()
+                    .unwrap_or_else(|| panic!("{name} 的 forms 含非字符串"))
+            })
+            .collect::<Vec<_>>();
+        let list = forms
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("    ({name:?}, &[{list}]),\n"));
+    }
+    out.push_str("];\n");
+    let out_path = Path::new(&std::env::var("OUT_DIR").unwrap()).join("forms_gen.rs");
+    fs::write(&out_path, out).unwrap_or_else(|e| panic!("写 {out_path:?} 失败: {e}"));
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let assets = manifest_dir.join("assets/colorscripts");
     println!("cargo:rerun-if-changed=assets/colorscripts");
+    gen_forms_table(&manifest_dir);
 
     let mut entries: Vec<(String, Vec<u8>, u8, u8)> = Vec::new();
     for size in ["small", "large"] {

@@ -218,7 +218,14 @@ fn packages() -> Option<String> {
 fn shell() -> Option<String> {
     let s = std::env::var("SHELL").ok()?;
     let base = s.rsplit('/').next().unwrap_or(&s);
-    (!base.is_empty()).then(|| base.to_string())
+    if base.is_empty() {
+        return None;
+    }
+    // 版本走 pacman 包库（可执行名≈包名），非 Arch 或查不到时只显示名字
+    match pacman_version(base) {
+        Some(v) => Some(format!("{base} {v}")),
+        None => Some(base.to_string()),
+    }
 }
 
 fn de() -> Option<String> {

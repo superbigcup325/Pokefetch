@@ -13,7 +13,9 @@ Rust 写的宝可梦 fetch：终端里的精灵字符画 + 系统信息面板，
 pokefetch              # 精灵 + 系统面板（fetch 式，1/128 概率 shiny）
 pokefetch --no-panel   # 纯精灵打印
 pokefetch -n pikachu   # 指定（形态传全名如 charizard-mega-x）
+pokefetch -n charizard -f mega-x   # 指定 + 形态
 pokefetch -r 1-3       # 1~3 代随机
+pokefetch --random-by-names pikachu,gengar  # 名单内随机
 pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
 ```
 
