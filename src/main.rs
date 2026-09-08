@@ -153,6 +153,9 @@ fn help() -> ! {
       --canvas <列宽>  画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
       --center         精灵在画布内居中（默认左锚）
       --no-panel       只输出精灵，不带系统信息面板
+      --modules <列表> 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
+                       可用: os host board bios kernel uptime packages shell de wm
+                             terminal gpu cpu memory swap disk battery load locale
       --title          显示精灵名字行（面板模式下默认不显示）
       --no-title       不显示名字行（纯精灵模式下默认显示）
   -l, --list           列出全部名字
@@ -284,6 +287,7 @@ fn main() {
     let mut center = false;
     let mut no_panel = false;
     let mut raw = false;
+    let mut modules: Option<Vec<String>> = None;
 
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -320,6 +324,20 @@ fn main() {
             "--title" => title = Some(true),
             "--no-title" => title = Some(false),
             "--no-panel" => no_panel = true,
+            "--modules" => match it.next() {
+                Some(v) => {
+                    let list: Vec<String> = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if list.is_empty() {
+                        die("--modules 需要模块列表，如 os,gpu,memory");
+                    }
+                    modules = Some(list);
+                }
+                None => die("--modules 需要模块列表，如 os,gpu,memory"),
+            },
             "--raw" => raw = true,
             "-o" | "--output" => match it.next() {
                 Some(v) => output = Some(std::path::PathBuf::from(v)),
@@ -423,7 +441,8 @@ fn main() {
                 println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
             }
             let body = if panel {
-                let info = sysinfo::collect();
+                let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
+                let info = sysinfo::collect(&names);
                 let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
                 compose(&ansi, panel_rows(&info), sprite_w, 3)
             } else {
