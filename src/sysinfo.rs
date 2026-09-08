@@ -28,21 +28,27 @@ const MODULES: &[(&str, &str, Fetcher)] = &[
     ("shell", "Shell", shell),
     ("de", "DE", de),
     ("wm", "WM", wm),
+    ("wmtheme", "WM Theme", wm_theme),
+    ("theme", "Theme", theme),
+    ("icons", "Icons", icons),
+    ("font", "Font", font),
+    ("cursor", "Cursor", cursor),
     ("terminal", "Terminal", terminal),
     ("gpu", "GPU", gpu),
     ("cpu", "CPU", cpu),
     ("memory", "Memory", memory),
     ("swap", "Swap", swap),
     ("disk", "Disk", disk),
+    ("localip", "Local IP", local_ip),
     ("battery", "Battery", battery),
     ("load", "Load", load),
     ("locale", "Locale", locale),
 ];
 
-/// 默认集（面板精选；board/bios 偏冷门，经 --modules 点名启用）
+/// 默认集（面板精选；board/bios 与 KDE 主题五件套经 --modules 点名启用）
 const DEFAULT_SELECTED: &[&str] = &[
     "os", "host", "kernel", "uptime", "packages", "shell", "de", "wm", "terminal", "gpu", "cpu",
-    "memory", "swap", "disk", "battery", "load", "locale",
+    "memory", "swap", "disk", "localip", "battery", "load", "locale",
 ];
 
 /// 全部可用模块名（帮助/报错用）
@@ -214,7 +220,73 @@ fn shell() -> Option<String> {
 
 fn de() -> Option<String> {
     let d = std::env::var("XDG_CURRENT_DESKTOP").ok()?;
-    d.split(':').find(|s| !s.is_empty()).map(str::to_string)
+    let name = d.split(':').find(|s| !s.is_empty())?;
+    let mut s = name.to_string();
+    match name {
+        // 版本号零依赖来源：KDE 走 pacman 包库，GNOME 走版本 xml
+        "KDE" => {
+            if let Some(v) = pacman_version("plasma-workspace") {
+                s = format!("{name} Plasma {v}");
+            }
+        }
+        "GNOME" => {
+            if let Some(v) = gnome_version() {
+                s = format!("{name} {v}");
+            }
+        }
+        _ => {}
+    }
+    Some(s)
+}
+
+/// pacman 本地包库 %VERSION%（剥掉 pkgrel）
+fn pacman_version(pkg: &str) -> Option<String> {
+    // 目录名形如 pkg-version-rel，按前缀匹配
+    let dir = std::fs::read_dir("/var/lib/pacman/local").ok()?;
+    let found = dir.flatten().map(|e| e.path()).find(|p| {
+        p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n == pkg || n.starts_with(&format!("{pkg}-"))
+        })
+    })?;
+    pacman_version_inner(&read(&format!("{}/desc", found.display()))?)
+}
+
+fn pacman_version_inner(desc: &str) -> Option<String> {
+    let mut section = "";
+    for line in desc.lines() {
+        if line.starts_with('%') && line.ends_with('%') {
+            section = &line[1..line.len() - 1];
+            continue;
+        }
+        if section == "VERSION" && !line.is_empty() {
+            return Some(line.split('-').next().unwrap_or(line).to_string());
+        }
+    }
+    None
+}
+
+/// /usr/share/gnome/gnome-version.xml → "47.2"
+fn gnome_version() -> Option<String> {
+    let xml = read("/usr/share/gnome/gnome-version.xml")?;
+    gnome_version_from(&xml)
+}
+
+fn gnome_version_from(xml: &str) -> Option<String> {
+    let tag = |t: &str| -> Option<String> {
+        let (open, close) = (format!("<{t}>"), format!("</{t}>"));
+        let start = xml.find(&open)? + open.len();
+        let end = xml[start..].find(&close)? + start;
+        Some(xml[start..end].to_string())
+    };
+    let mut v = tag("platform")?;
+    for part in ["minor", "micro"] {
+        if let Some(x) = tag(part) {
+            v.push('.');
+            v.push_str(&x);
+        }
+    }
+    Some(v)
 }
 
 fn wm() -> Option<String> {
@@ -225,6 +297,87 @@ fn wm() -> Option<String> {
         Ok("x11") => Some(format!("{name} (X11)")),
         _ => Some(name.into()),
     }
+}
+
+// ---- KDE 主题五件套：kdeglobals / kwinrc ini 解析（非 KDE 环境文件缺失自动跳行） ----
+
+/// ini 文本中 [section] 段的 key 值（KDE 配置即此形式，不做转义处理）
+fn ini_get<'a>(content: &'a str, section: &str, key: &str) -> Option<&'a str> {
+    let mut in_section = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line == format!("[{section}]");
+        } else if in_section
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim());
+        }
+    }
+    None
+}
+
+/// XDG 配置目录下的文件路径
+fn config_path(file: &str) -> Option<String> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join(file).display().to_string())
+}
+
+/// KDE 配置文件某段的某个键（空值视同缺失）
+fn kde_ini(file: &str, section: &str, key: &str) -> Option<String> {
+    let content = read(&config_path(file)?)?;
+    ini_get(&content, section, key)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn wm_theme() -> Option<String> {
+    let t = kde_ini("kwinrc", "org.kde.kdecoration2", "theme")?;
+    // aurorae 主题存的是 "__aurorae__svg__WhiteSur-dark"，剥掉内部前缀
+    Some(t.strip_prefix("__aurorae__svg__").unwrap_or(&t).to_string())
+}
+
+fn theme() -> Option<String> {
+    kde_ini("kdeglobals", "General", "ColorScheme")
+}
+
+fn icons() -> Option<String> {
+    kde_ini("kdeglobals", "Icons", "Theme")
+}
+
+fn cursor() -> Option<String> {
+    // KDE 链：用户 kcminputrc → 发行版默认 kdedefaults/kcminputrc
+    let theme = kde_ini("kcminputrc", "Mouse", "cursorTheme")
+        .or_else(|| kde_ini("kdedefaults/kcminputrc", "Mouse", "cursorTheme"))?;
+    // "WhiteSur-cursors" 这类包名习惯剥掉 -cursors 后缀
+    let theme = theme.strip_suffix("-cursors").unwrap_or(&theme).to_string();
+    let size = kde_ini("kcminputrc", "Mouse", "cursorSize")
+        .or_else(|| kde_ini("kdedefaults/kcminputrc", "Mouse", "cursorSize"));
+    Some(match size {
+        Some(s) => format!("{theme} ({s}px)"),
+        None => theme,
+    })
+}
+
+fn font() -> Option<String> {
+    kde_ini("kdeglobals", "General", "font").and_then(|f| qt_font_str(&f))
+}
+
+/// Qt 字体串 "Inter,11,-1,5,..." → "Inter (11pt)"
+fn qt_font_str(s: &str) -> Option<String> {
+    let mut it = s.split(',');
+    let family = it.next()?.trim().to_string();
+    let pt = it.next()?.trim().parse::<u8>().ok()?;
+    (!family.is_empty()).then(|| format!("{family} ({pt}pt)"))
 }
 
 /// DE → WM 已知映射（桌面环境启动的合成器是确定的）
@@ -266,10 +419,12 @@ fn ppid_of(pid: u32) -> Option<u32> {
     after_comm.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// GPU 粗版：PCI vendor 映射 + 内核驱动名（精确型号需要 pci.ids，不做）
+/// GPU：pci.ids 可查则显示营销型号，否则退回厂商+内核驱动名；
+/// 多卡且存在 Intel 时对非 Intel 标 [Discrete]
 fn gpu() -> Option<String> {
     let dir = std::fs::read_dir("/sys/class/drm").ok()?;
-    let mut gpus: Vec<String> = Vec::new();
+    let ids = pci_ids();
+    let mut gpus: Vec<(String, u16)> = Vec::new();
     for entry in dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // 只要 card0/card1…，排除 card0-DP-1 等连接器节点
@@ -281,23 +436,93 @@ fn gpu() -> Option<String> {
             continue;
         }
         let dev = entry.path().join("device");
-        let vendor_raw = read(&format!("{}/vendor", dev.display()))?;
-        let vendor = u16::from_str_radix(vendor_raw.trim_start_matches("0x"), 16).ok()?;
-        let vendor_name = vendor_name(vendor).unwrap_or(vendor_raw.trim_start_matches("0x"));
-        let driver = std::fs::read_link(format!("{}/driver", dev.display()))
-            .ok()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
-        match driver {
-            Some(d) => gpus.push(format!("{vendor_name} ({d})")),
-            None => gpus.push(vendor_name.to_string()),
+        let (Some(vendor_raw), Some(device_raw)) = (
+            read(&format!("{}/vendor", dev.display())),
+            read(&format!("{}/device", dev.display())),
+        ) else {
+            continue;
+        };
+        let Ok(vendor) = u16::from_str_radix(vendor_raw.trim_start_matches("0x"), 16) else {
+            continue;
+        };
+        let device = u16::from_str_radix(device_raw.trim_start_matches("0x"), 16).ok();
+        let vname = vendor_name(vendor).unwrap_or(vendor_raw.trim_start_matches("0x"));
+        // pci.ids 可查则显示营销型号，否则退回内核驱动名
+        let label = match device.and_then(|d| {
+            ids.as_deref()
+                .and_then(|ids| pci_device_name(ids, vendor, d))
+        }) {
+            Some(model) => format!("{vname} {model}"),
+            None => {
+                let driver = std::fs::read_link(format!("{}/driver", dev.display()))
+                    .ok()
+                    .map(|p| {
+                        p.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                match driver {
+                    Some(d) => format!("{vname} ({d})"),
+                    None => vname.to_string(),
+                }
+            }
+        };
+        gpus.push((label, vendor));
+    }
+    if gpus.len() > 1 && gpus.iter().any(|(_, v)| *v == 0x8086) {
+        for (label, v) in &mut gpus {
+            if *v != 0x8086 {
+                label.push_str(" [Discrete]");
+            }
         }
     }
-    (!gpus.is_empty()).then(|| gpus.join(", "))
+    (!gpus.is_empty()).then(|| {
+        gpus.into_iter()
+            .map(|(l, _)| l)
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+/// 系统 pci.ids 数据库（hwdata），缺失则 GPU 降级粗版
+fn pci_ids() -> Option<String> {
+    ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+/// pci.ids 文本中查 vendor:device 的设备名；"GA107M [GeForce RTX 3050 Mobile]"
+/// 这类带方括号的名字取括号内营销名
+fn pci_device_name(content: &str, vendor: u16, device: u16) -> Option<String> {
+    let vs = format!("{vendor:04x}");
+    let ds = format!("{device:04x}");
+    let mut in_vendor = false;
+    for line in content.lines() {
+        // 空行与注释行（vendor 段内部也有）不改变段落状态
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with('\t') {
+            in_vendor = line
+                .split_whitespace()
+                .next()
+                .is_some_and(|id| id.eq_ignore_ascii_case(&vs));
+            continue;
+        }
+        if !in_vendor || line.starts_with("\t\t") {
+            continue; // 子系统等二级条目不查
+        }
+        let body = line.trim_start();
+        if body.split_whitespace().next().is_some_and(|id| id == ds) {
+            let name = body[ds.len()..].trim();
+            return Some(match (name.find('['), name.ends_with(']')) {
+                (Some(i), true) => name[i + 1..name.len() - 1].to_string(),
+                _ => name.to_string(),
+            });
+        }
+    }
+    None
 }
 
 /// PCI vendor id → 厂商名
@@ -414,6 +639,117 @@ fn fs_type_of(mountinfo: &str, mount: &str) -> Option<String> {
         return post.split(' ').next().map(str::to_string);
     }
     None
+}
+
+/// Local IP：手写 SIOCGIFCONF/SIOCGIFNETMASK FFI（与 terminal_size 的 ioctl 同风格），
+/// 列出非 loopback 的 IPv4 接口
+fn local_ip() -> Option<String> {
+    #[repr(C)]
+    struct IfConf {
+        len: i32,
+        ptr: *mut IfReq,
+    }
+    unsafe extern "C" {
+        fn socket(domain: i32, ty: i32, proto: i32) -> i32;
+        fn close(fd: i32) -> i32;
+        fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
+    }
+    const SIOCGIFCONF: u64 = 0x8912;
+    const SIOCGIFNETMASK: u64 = 0x891b;
+
+    let fd = unsafe {
+        socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0)
+    };
+    if fd < 0 {
+        return None;
+    }
+    let work = (|| {
+        // SIOCGIFCONF：缓冲不够时内核截断不报错，装满就翻倍重试
+        let mut cap: usize = 4096;
+        let entries = loop {
+            let mut buf = vec![0u8; cap];
+            let mut ifc = IfConf {
+                len: cap as i32,
+                ptr: buf.as_mut_ptr() as *mut IfReq,
+            };
+            if unsafe {
+                ioctl(
+                    fd,
+                    SIOCGIFCONF,
+                    &mut ifc as *mut IfConf as *mut std::ffi::c_void,
+                )
+            } != 0
+            {
+                return None;
+            }
+            let used = ifc.len as usize;
+            if used + std::mem::size_of::<IfReq>() <= cap {
+                break ifreq_entries(&buf[..used]);
+            }
+            cap *= 2;
+            if cap > (1 << 20) {
+                return None;
+            }
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for (name, ip) in entries {
+            if name == "lo" {
+                continue;
+            }
+            let mut req = IfReq {
+                name: [0; 16],
+                data: [0; 24],
+            };
+            req.name[..name.len()].copy_from_slice(name.as_bytes());
+            if unsafe {
+                ioctl(
+                    fd,
+                    SIOCGIFNETMASK,
+                    &mut req as *mut IfReq as *mut std::ffi::c_void,
+                )
+            } != 0
+            {
+                continue;
+            }
+            let mask = [req.data[4], req.data[5], req.data[6], req.data[7]];
+            parts.push(format!("{name}: {}/{}", ipv4_str(ip), prefix_of(mask)));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    })();
+    unsafe { close(fd) };
+    work
+}
+
+/// struct ifreq：name[16] + ifru union[24]（x86_64 上 sockaddr/ifmap 均装得下）
+#[repr(C)]
+struct IfReq {
+    name: [u8; 16],
+    data: [u8; 24],
+}
+
+/// 解析 SIOCGIFCONF 缓冲：40B 定长 ifreq，name[16] + sockaddr union[24]，
+/// 仅保留 AF_INET 条目
+fn ifreq_entries(buf: &[u8]) -> Vec<(String, [u8; 4])> {
+    let stride = std::mem::size_of::<IfReq>();
+    buf.chunks_exact(stride)
+        .filter_map(|r| {
+            let family = u16::from_le_bytes([r[16], r[17]]);
+            if family != 2 {
+                return None;
+            }
+            let name_end = r[..16].iter().position(|&b| b == 0).unwrap_or(16);
+            let name = String::from_utf8_lossy(&r[..name_end]).to_string();
+            Some((name, [r[20], r[21], r[22], r[23]]))
+        })
+        .collect()
+}
+
+fn ipv4_str(b: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+}
+
+fn prefix_of(netmask: [u8; 4]) -> u32 {
+    u32::from_be_bytes(netmask).count_ones()
 }
 
 fn battery() -> Option<String> {
@@ -543,6 +879,80 @@ mod tests {
     fn cpu_freq_format() {
         assert_eq!(freq_str(4500000), " @ 4.50 GHz");
         assert_eq!(freq_str(3200000), " @ 3.20 GHz");
+    }
+
+    #[test]
+    fn ifconf_buffer_parsing() {
+        // 两条 40B ifreq：eth0=AF_INET 192.168.1.8，lo=AF_INET 127.0.0.1
+        let mut buf = vec![0u8; 80];
+        buf[..4].copy_from_slice(b"eth0");
+        buf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        buf[20..24].copy_from_slice(&[192, 168, 1, 8]);
+        buf[40..42].copy_from_slice(b"lo");
+        buf[56..58].copy_from_slice(&2u16.to_le_bytes());
+        buf[60..64].copy_from_slice(&[127, 0, 0, 1]);
+        let entries = ifreq_entries(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("eth0".to_string(), [192, 168, 1, 8]));
+        // 非 AF_INET 条目被过滤
+        buf[16..18].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(ifreq_entries(&buf).len(), 1);
+    }
+
+    #[test]
+    fn netmask_prefix() {
+        assert_eq!(prefix_of([255, 255, 255, 0]), 24);
+        assert_eq!(prefix_of([255, 255, 252, 0]), 22);
+        assert_eq!(prefix_of([0, 0, 0, 0]), 0);
+        assert_eq!(ipv4_str([172, 29, 31, 103]), "172.29.31.103");
+    }
+
+    #[test]
+    fn pci_ids_lookup() {
+        let ids = "10de  NVIDIA Corporation\n\
+                   \t25a2  GA107M [GeForce RTX 3050 Mobile]\n\
+                   \t\tff00  device\n\
+                   8086  Intel Corporation\n\
+                   \t46a6  Alder Lake-UP3 GT2 [Iris Xe]\n";
+        assert_eq!(
+            pci_device_name(ids, 0x10de, 0x25a2),
+            Some("GeForce RTX 3050 Mobile".into())
+        );
+        assert_eq!(pci_device_name(ids, 0x8086, 0x46a6), Some("Iris Xe".into()));
+        assert_eq!(pci_device_name(ids, 0x10de, 0xffff), None);
+    }
+
+    #[test]
+    fn ini_lookup() {
+        let cfg = "[General]\nColorScheme=NimbusRefinedDark\nfont=Inter,11,-1,5\n\n[Icons]\nTheme=WhiteSur\n";
+        assert_eq!(
+            ini_get(cfg, "General", "ColorScheme"),
+            Some("NimbusRefinedDark")
+        );
+        assert_eq!(ini_get(cfg, "Icons", "Theme"), Some("WhiteSur"));
+        assert_eq!(ini_get(cfg, "General", "missing"), None);
+        assert_eq!(ini_get(cfg, "NoSection", "ColorScheme"), None);
+    }
+
+    #[test]
+    fn qt_font_parsing() {
+        assert_eq!(
+            qt_font_str("Inter,11,-1,5,50,0"),
+            Some("Inter (11pt)".into())
+        );
+        assert_eq!(qt_font_str(",10,x"), None);
+    }
+
+    #[test]
+    fn pacman_version_parsing() {
+        let desc = "%NAME%\nplasma-workspace\n\n%VERSION%\n6.7.4-1\n\n%BASE%\nx\n";
+        assert_eq!(pacman_version_inner(desc), Some("6.7.4".into()));
+    }
+
+    #[test]
+    fn gnome_version_parsing() {
+        let xml = "<gnome-version><platform>47</platform><minor>2</minor><micro>1</micro></gnome-version>";
+        assert_eq!(gnome_version_from(xml), Some("47.2.1".into()));
     }
 
     #[test]

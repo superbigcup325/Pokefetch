@@ -155,7 +155,8 @@ fn help() -> ! {
       --no-panel       只输出精灵，不带系统信息面板
       --modules <列表> 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
                        可用: os host board bios kernel uptime packages shell de wm
-                             terminal gpu cpu memory swap disk battery load locale
+                             wmtheme theme icons font cursor terminal gpu cpu memory
+                             swap disk localip battery load locale
       --title          显示精灵名字行（面板模式下默认不显示）
       --no-title       不显示名字行（纯精灵模式下默认显示）
   -l, --list           列出全部名字

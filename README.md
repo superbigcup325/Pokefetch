@@ -19,8 +19,8 @@ pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
 
 面板信息读自 /proc、/sys 与环境变量，零外部依赖，取不到的行自动跳过。
 默认为精选模块集，`--modules os,gpu,memory,…` 可任意挑选
-（可用：os host board bios kernel uptime packages shell de wm terminal gpu cpu
-memory swap disk battery load locale）。
+（可用：os host board bios kernel uptime packages shell de wm wmtheme theme icons
+font cursor terminal gpu cpu memory swap disk localip battery load locale）。
 
 ## 接入 fastfetch
 
