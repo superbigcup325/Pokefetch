@@ -82,7 +82,7 @@ pub fn collect(selected: &[&str]) -> FetchInfo {
         rows: MODULES
             .iter()
             .filter(|(n, _, _)| selected.contains(n))
-            .filter_map(|(n, label, f)| f().map(|v| ((*label).to_string(), v)))
+            .filter_map(|(_, label, f)| f().map(|v| ((*label).to_string(), v)))
             .collect(),
     }
 }
