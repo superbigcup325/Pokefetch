@@ -2,6 +2,7 @@
 // 素材编译期内嵌：build.rs 编码 + 压缩生成 OUT_DIR/sprites.bin（key 排序，运行时二分）
 // 编解码核心见 codec.rs（build.rs 与运行时共用）
 mod codec;
+mod ffi;
 mod sysinfo;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
@@ -140,7 +141,35 @@ fn parse_gens(spec: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// 模块名清单按给定列宽贪心折行（模块名均 ASCII），供 help 展示；
+/// 从 sysinfo 注册表派生，避免与 MODULES 手工双份漂移
+fn module_help_lines(width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for name in sysinfo::module_names() {
+        match lines.last_mut() {
+            Some(l) if l.chars().count() + 1 + name.len() <= width => {
+                l.push(' ');
+                l.push_str(name);
+            }
+            _ => lines.push(name.to_string()),
+        }
+    }
+    lines
+}
+
 fn help() -> ! {
+    let mod_lines = module_help_lines(55)
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                format!("                       可用: {l}")
+            } else {
+                format!("                             {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     eprint!(
         "pokefetch —— 终端里的宝可梦
 
@@ -154,9 +183,7 @@ fn help() -> ! {
       --center         精灵在画布内居中（默认左锚）
       --no-panel       只输出精灵，不带系统信息面板
       --modules <列表> 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
-                       可用: os host board bios kernel uptime packages shell de wm
-                             wmtheme theme icons font cursor terminal gpu cpu memory
-                             swap disk localip battery load locale
+{mod_lines}
       --title          显示精灵名字行（面板模式下默认不显示）
       --no-title       不显示名字行（纯精灵模式下默认显示）
   -l, --list           列出全部名字
@@ -174,55 +201,6 @@ fastfetch 对接:
 "
     );
     std::process::exit(0);
-}
-
-/// 终端尺寸（行, 列）。优先查控制终端 /dev/tty——stdout 被管道接管
-/// （fastfetch 注入场景）时它才是最终显示窗口；再退标准流；都不是 tty 返回 None
-fn terminal_size() -> Option<(usize, usize)> {
-    #[repr(C)]
-    struct Winsize {
-        rows: u16,
-        cols: u16,
-        xpix: u16,
-        ypix: u16,
-    }
-    unsafe extern "C" {
-        fn open(path: *const std::os::raw::c_char, flags: i32) -> i32;
-        fn close(fd: i32) -> i32;
-        fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
-    }
-    const TIOCGWINSZ: u64 = 0x5413;
-    let query = |fd: i32| unsafe {
-        let mut ws = Winsize {
-            rows: 0,
-            cols: 0,
-            xpix: 0,
-            ypix: 0,
-        };
-        if ioctl(
-            fd,
-            TIOCGWINSZ,
-            &mut ws as *mut Winsize as *mut std::ffi::c_void,
-        ) == 0
-            && ws.rows > 0
-            && ws.cols > 0
-        {
-            Some((usize::from(ws.rows), usize::from(ws.cols)))
-        } else {
-            None
-        }
-    };
-    unsafe {
-        let fd = open(c"/dev/tty".as_ptr(), 2 /* O_RDWR */);
-        if fd >= 0 {
-            let size = query(fd);
-            close(fd);
-            if size.is_some() {
-                return size;
-            }
-        }
-    }
-    [1, 0, 2].into_iter().find_map(query)
 }
 
 /// 行的可见宽度（字形均单宽；跳过 \x1b[..m 转义段）
@@ -278,6 +256,16 @@ fn cache_logo_path() -> std::path::PathBuf {
             std::path::PathBuf::from(home).join(".cache")
         });
     base.join("pokefetch").join("logo.ans")
+}
+
+/// 输出目的地：stdout 直打印（可挂面板/标题），或写文件
+/// （--logo-cache 写完照常回显，让用户知道这次抽到了谁）
+enum Dest {
+    Stdout,
+    File {
+        path: std::path::PathBuf,
+        echo: bool,
+    },
 }
 
 fn main() {
@@ -361,10 +349,23 @@ fn main() {
 
     let index = sprites_index();
 
+    let dest = match output {
+        Some(path) => Dest::File {
+            path,
+            echo: logo_cache,
+        },
+        None => Dest::Stdout,
+    };
+    let on_stdout = matches!(dest, Dest::Stdout);
+    let echo = matches!(dest, Dest::File { echo: true, .. });
+
     // 终端检测只服务两件事：随机池过滤 + 默认画布收窄。
     // 上屏路径（stdout / --logo-cache）才检测；裸 -o 写文件保持确定性
-    let adapt = output.is_none() || logo_cache;
-    let term = if adapt { terminal_size() } else { None };
+    let term = if on_stdout || echo {
+        ffi::terminal_size()
+    } else {
+        None
+    };
 
     let mut rng = Rng::new();
     let chosen: String = match name {
@@ -378,14 +379,15 @@ fn main() {
             }
             let size = if big { "large" } else { "small" };
             let variant = if shiny { "shiny" } else { "regular" };
+            let all = names();
             let (lo, hi) = match &gens {
                 Some(spec) => {
                     let ranges = parse_gens(spec);
                     ranges[rng.below(ranges.len())]
                 }
-                None => (1, names().len()),
+                None => (1, all.len()),
             };
-            let mut pool: Vec<&'static str> = names()[lo - 1..hi].to_vec();
+            let mut pool: Vec<&'static str> = all[lo - 1..hi].to_vec();
             // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
             if let Some((_, cols)) = term {
                 let fits: Vec<&'static str> = pool
@@ -426,28 +428,16 @@ fn main() {
     };
 
     // 面板只挂 stdout 直打印路径；--raw / 写文件（含 --logo-cache）恒为纯精灵
-    let panel = output.is_none() && !no_panel && !raw;
-    let show_title = title.unwrap_or(!panel && !raw);
+    let panel = on_stdout && !no_panel && !raw;
+    // 名字行：--raw 恒隐藏；stdout 面板模式默认隐藏；纯精灵 stdout 与写文件
+    // 回显默认显示；--title/--no-title 显式覆盖
+    let show_title = title.unwrap_or(!raw && !(on_stdout && panel));
 
-    match &output {
-        Some(path) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .unwrap_or_else(|e| die(&format!("建目录 {parent:?} 失败: {e}")));
-            }
-            std::fs::write(path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
-            if logo_cache {
-                // 缓存模式照常打印，让用户知道这次抽到了谁
-                if show_title {
-                    println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
-                }
-                print!("{ansi}");
-            }
-        }
-        None => {
-            if show_title {
-                println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
-            }
+    if show_title && (on_stdout || echo) {
+        println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
+    }
+    match dest {
+        Dest::Stdout => {
             let body = if panel {
                 let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
                 let info = sysinfo::collect(&names);
@@ -457,6 +447,16 @@ fn main() {
                 ansi
             };
             print!("{body}");
+        }
+        Dest::File { path, echo } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| die(&format!("建目录 {parent:?} 失败: {e}")));
+            }
+            std::fs::write(&path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
+            if echo {
+                print!("{ansi}");
+            }
         }
     }
 }

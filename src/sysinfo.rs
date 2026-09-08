@@ -3,6 +3,9 @@
 //
 // 结构：MODULES 注册表是单一事实源——模块名、取值函数、展开顺序、
 // 默认集与 --modules 校验全部由它派生；collect 只按解析出的名单展开。
+// 手写 libc FFI（Local IP / Disk 用）统一声明在 crate::ffi。
+
+use crate::ffi::{self, IfConf, IfReq, SIOCGIFCONF, SIOCGIFNETMASK};
 
 /// 面板一行 key: value 的纯数据
 pub type Row = (String, String);
@@ -591,28 +594,10 @@ fn swap() -> Option<String> {
     Some(usage(total.saturating_sub(free), total))
 }
 
-/// Disk：手写 statvfs FFI（与 terminal_size 的 ioctl 同风格，零 crate）
+/// Disk：statvfs FFI（声明见 ffi.rs），报告根挂载点用量
 fn disk() -> Option<String> {
-    #[repr(C)]
-    struct Statvfs {
-        f_bsize: u64,
-        f_frsize: u64,
-        f_blocks: u64,
-        f_bfree: u64,
-        f_bavail: u64,
-        f_files: u64,
-        f_ffree: u64,
-        f_favail: u64,
-        f_fsid: u64,
-        f_flag: u64,
-        f_namemax: u64,
-        __reserved: [u32; 3],
-    }
-    unsafe extern "C" {
-        fn statvfs(path: *const std::os::raw::c_char, buf: *mut Statvfs) -> i32;
-    }
-    let mut buf: Statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { statvfs(c"/".as_ptr(), &mut buf) } != 0 {
+    let mut buf: ffi::Statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { ffi::statvfs(c"/".as_ptr(), &mut buf) } != 0 {
         return None;
     }
     let unit = buf.f_frsize.max(buf.f_bsize);
@@ -641,24 +626,11 @@ fn fs_type_of(mountinfo: &str, mount: &str) -> Option<String> {
     None
 }
 
-/// Local IP：手写 SIOCGIFCONF/SIOCGIFNETMASK FFI（与 terminal_size 的 ioctl 同风格），
+/// Local IP：SIOCGIFCONF/SIOCGIFNETMASK（FFI 声明见 ffi.rs），
 /// 列出非 loopback 的 IPv4 接口
 fn local_ip() -> Option<String> {
-    #[repr(C)]
-    struct IfConf {
-        len: i32,
-        ptr: *mut IfReq,
-    }
-    unsafe extern "C" {
-        fn socket(domain: i32, ty: i32, proto: i32) -> i32;
-        fn close(fd: i32) -> i32;
-        fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
-    }
-    const SIOCGIFCONF: u64 = 0x8912;
-    const SIOCGIFNETMASK: u64 = 0x891b;
-
     let fd = unsafe {
-        socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0)
+        ffi::socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0)
     };
     if fd < 0 {
         return None;
@@ -673,7 +645,7 @@ fn local_ip() -> Option<String> {
                 ptr: buf.as_mut_ptr() as *mut IfReq,
             };
             if unsafe {
-                ioctl(
+                ffi::ioctl(
                     fd,
                     SIOCGIFCONF,
                     &mut ifc as *mut IfConf as *mut std::ffi::c_void,
@@ -702,7 +674,7 @@ fn local_ip() -> Option<String> {
             };
             req.name[..name.len()].copy_from_slice(name.as_bytes());
             if unsafe {
-                ioctl(
+                ffi::ioctl(
                     fd,
                     SIOCGIFNETMASK,
                     &mut req as *mut IfReq as *mut std::ffi::c_void,
@@ -716,15 +688,8 @@ fn local_ip() -> Option<String> {
         }
         (!parts.is_empty()).then(|| parts.join(", "))
     })();
-    unsafe { close(fd) };
+    unsafe { ffi::close(fd) };
     work
-}
-
-/// struct ifreq：name[16] + ifru union[24]（x86_64 上 sockaddr/ifmap 均装得下）
-#[repr(C)]
-struct IfReq {
-    name: [u8; 16],
-    data: [u8; 24],
 }
 
 /// 解析 SIOCGIFCONF 缓冲：40B 定长 ifreq，name[16] + sockaddr union[24]，
