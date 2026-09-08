@@ -152,8 +152,13 @@ fn kernel() -> Option<String> {
 
 fn uptime() -> Option<String> {
     let t = read("/proc/uptime")?;
-    let secs = t.split_whitespace().next()?.parse::<u64>().ok()?;
-    Some(fmt_uptime(secs))
+    Some(fmt_uptime(uptime_secs(&t)?))
+}
+
+/// /proc/uptime 首字段是浮点秒（如 "9623.03"），取整
+fn uptime_secs(t: &str) -> Option<u64> {
+    let s = t.split_whitespace().next()?.parse::<f64>().ok()?;
+    Some(s.max(0.0) as u64)
 }
 
 /// 秒 → "2 hours, 51 mins" 风格：取最长的两段非零单位
@@ -459,6 +464,13 @@ mod tests {
         assert_eq!(fmt_uptime(3600), "1 hour");
         assert_eq!(fmt_uptime(5460), "1 hour, 31 mins");
         assert_eq!(fmt_uptime(90000), "1 day, 1 hour");
+    }
+
+    #[test]
+    fn uptime_parses_fractional() {
+        assert_eq!(uptime_secs("9623.03 148590.88"), Some(9623));
+        assert_eq!(uptime_secs("0.5 0"), Some(0));
+        assert_eq!(uptime_secs("abc"), None);
     }
 
     #[test]
