@@ -116,9 +116,14 @@ fn parse_pretty_os(content: &str) -> Option<String> {
 }
 
 fn host() -> Option<String> {
-    dmi("product_name")
+    let name = dmi("product_name")
         .filter(|s| !s.is_empty())
-        .or_else(|| dmi("board_name").filter(|s| !s.is_empty()))
+        .or_else(|| dmi("board_name").filter(|s| !s.is_empty()))?;
+    // 联想等厂商把营销名放 product_family，拼成 "82RC (Legion Y7000P IAH7)"
+    match dmi("product_family").filter(|s| !s.is_empty() && *s != name) {
+        Some(family) => Some(format!("{name} ({family})")),
+        None => Some(name),
+    }
 }
 
 fn board() -> Option<String> {
@@ -147,7 +152,9 @@ fn dmi(file: &str) -> Option<String> {
 }
 
 fn kernel() -> Option<String> {
-    read("/proc/sys/kernel/osrelease")
+    let release = read("/proc/sys/kernel/osrelease")?;
+    let os_type = read("/proc/sys/kernel/ostype").unwrap_or_else(|| std::env::consts::OS.into());
+    Some(format!("{os_type} {release}"))
 }
 
 fn uptime() -> Option<String> {
@@ -314,7 +321,32 @@ fn cpu() -> Option<String> {
         .and_then(|l| l.split_once(':'))
         .map(|(_, v)| v.trim().to_string())?;
     let cores = info.lines().filter(|l| l.starts_with("processor")).count();
-    Some(format!("{model} ({cores})"))
+    // P/E 核区分需要 sysfs core_type（本机内核未导出），先显示总核数
+    let mut s = format!("{model} ({cores})");
+    if let Some(khz) = max_cpu_freq() {
+        s.push_str(&freq_str(khz));
+    }
+    Some(s)
+}
+
+/// 各 cpu 的 cpuinfo_max_freq（kHz）最大值
+fn max_cpu_freq() -> Option<u64> {
+    std::fs::read_dir("/sys/devices/system/cpu")
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_prefix("cpu")
+                .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter_map(|e| read(&format!("{}/cpufreq/cpuinfo_max_freq", e.path().display())))
+        .filter_map(|v| v.parse().ok())
+        .max()
+}
+
+fn freq_str(khz: u64) -> String {
+    format!(" @ {:.2} GHz", khz as f64 / 1e6)
 }
 
 fn memory() -> Option<String> {
@@ -361,7 +393,27 @@ fn disk() -> Option<String> {
     let unit = buf.f_frsize.max(buf.f_bsize);
     let total_kib = buf.f_blocks.saturating_mul(unit) / 1024;
     let avail_kib = buf.f_bavail.saturating_mul(unit) / 1024;
-    Some(usage(total_kib.saturating_sub(avail_kib), total_kib))
+    let mut s = usage(total_kib.saturating_sub(avail_kib), total_kib);
+    if let Some(t) = read("/proc/self/mountinfo").and_then(|m| fs_type_of(&m, "/")) {
+        s.push_str(&format!(" - {t}"));
+    }
+    Some(s)
+}
+
+/// mountinfo 中指定挂载点的文件系统类型（"/" 无空格转义问题）
+fn fs_type_of(mountinfo: &str, mount: &str) -> Option<String> {
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        if fields.get(4) != Some(&mount) {
+            continue;
+        }
+        // 行尾 " - fstype source superoptions"；异常行跳过继续找
+        let Some((_, post)) = line.split_once(" - ") else {
+            continue;
+        };
+        return post.split(' ').next().map(str::to_string);
+    }
+    None
 }
 
 fn battery() -> Option<String> {
@@ -377,7 +429,12 @@ fn battery() -> Option<String> {
     let ac = supply_online("AC")
         .or_else(|| supply_online("ADP"))
         .unwrap_or(false);
-    Some(format!("{cap}% [{}]", battery_label(&status, ac)))
+    let s = format!("{cap}% [{}]", battery_label(&status, ac));
+    // 型号名（如 L21B4PC0）括注，对齐 fastfetch 的电池标识
+    match read(&format!("{}/model_name", bat.display())).filter(|m| !m.is_empty()) {
+        Some(model) => Some(format!("{s} ({model})")),
+        None => Some(s),
+    }
 }
 
 fn battery_label(status: &str, ac: bool) -> String {
@@ -471,6 +528,21 @@ mod tests {
         assert_eq!(uptime_secs("9623.03 148590.88"), Some(9623));
         assert_eq!(uptime_secs("0.5 0"), Some(0));
         assert_eq!(uptime_secs("abc"), None);
+    }
+
+    #[test]
+    fn mountinfo_fs_type() {
+        let sample = "36 35 0:35 / / rw,noatime shared:1 - btrfs /dev/nvme1n1p2 rw,ssd\n\
+                      40 35 0:40 / /boot rw - ext4 /dev/nvme0n1p1 rw\n";
+        assert_eq!(fs_type_of(sample, "/"), Some("btrfs".into()));
+        assert_eq!(fs_type_of(sample, "/boot"), Some("ext4".into()));
+        assert_eq!(fs_type_of(sample, "/nonexist"), None);
+    }
+
+    #[test]
+    fn cpu_freq_format() {
+        assert_eq!(freq_str(4500000), " @ 4.50 GHz");
+        assert_eq!(freq_str(3200000), " @ 3.20 GHz");
     }
 
     #[test]
