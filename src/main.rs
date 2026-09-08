@@ -1,7 +1,8 @@
-// pokefetch —— 随机/指定打印宝可梦字符画
+// pokefetch —— 终端里的宝可梦 fetch：精灵字符画 + 系统信息面板
 // 素材编译期内嵌：build.rs 编码 + 压缩生成 OUT_DIR/sprites.bin（key 排序，运行时二分）
 // 编解码核心见 codec.rs（build.rs 与运行时共用）
 mod codec;
+mod sysinfo;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 
@@ -151,17 +152,20 @@ fn help() -> ! {
   -b, --big            大尺寸字符画（默认 small）
       --canvas <列宽>  画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
       --center         精灵在画布内居中（默认左锚）
-      --no-title       不显示名字行
+      --no-panel       只输出精灵，不带系统信息面板
+      --title          显示精灵名字行（面板模式下默认不显示）
+      --no-title       不显示名字行（纯精灵模式下默认显示）
   -l, --list           列出全部名字
 
 fastfetch 对接:
-      --raw            只输出字符画本体（无名字行），可作 logo 源:
+      --raw            只输出字符画本体（无名字行无面板），可作 logo 源:
                        fastfetch --data-raw \"$(pokefetch -r --raw)\"
   -o, --output <文件>  字符画写入文件（stdout 不输出）
       --logo-cache     写入 ~/.cache/pokefetch/logo.ans 并照常打印；
                        配合仓库附带的 fastfetch.jsonc 使用（fastfetch --config）
 
 随机时自动跳过当前终端放不下的精灵；显式 -n/-b 不做干预、原样输出。
+面板信息来自 /proc、/sys 与环境变量，取不到的行自动跳过。
   -h, --help           本帮助
 "
     );
@@ -271,13 +275,15 @@ fn main() {
     let mut name: Option<String> = None;
     let mut shiny = false;
     let mut big = false;
-    let mut title = true;
+    let mut title: Option<bool> = None; // None = 按模式取默认（面板模式隐藏，纯精灵显示）
     let mut random = false;
     let mut gens: Option<String> = None;
     let mut output: Option<std::path::PathBuf> = None;
     let mut logo_cache = false;
     let mut canvas: Option<usize> = None;
     let mut center = false;
+    let mut no_panel = false;
+    let mut raw = false;
 
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -311,8 +317,10 @@ fn main() {
                 None => die("--canvas 需要一个列宽"),
             },
             "--center" => center = true,
-            "--no-title" => title = false,
-            "--raw" => title = false,
+            "--title" => title = Some(true),
+            "--no-title" => title = Some(false),
+            "--no-panel" => no_panel = true,
+            "--raw" => raw = true,
             "-o" | "--output" => match it.next() {
                 Some(v) => output = Some(std::path::PathBuf::from(v)),
                 None => die("-o 需要一个文件路径"),
@@ -391,6 +399,10 @@ fn main() {
         ansi
     };
 
+    // 面板只挂 stdout 直打印路径；--raw / 写文件（含 --logo-cache）恒为纯精灵
+    let panel = output.is_none() && !no_panel && !raw;
+    let show_title = title.unwrap_or(!panel && !raw);
+
     match &output {
         Some(path) => {
             if let Some(parent) = path.parent() {
@@ -400,19 +412,75 @@ fn main() {
             std::fs::write(path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
             if logo_cache {
                 // 缓存模式照常打印，让用户知道这次抽到了谁
-                if title {
+                if show_title {
                     println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
                 }
                 print!("{ansi}");
             }
         }
         None => {
-            if title {
+            if show_title {
                 println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
             }
-            print!("{ansi}");
+            let body = if panel {
+                let info = sysinfo::collect();
+                let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
+                compose(&ansi, panel_rows(&info), sprite_w, 3)
+            } else {
+                ansi
+            };
+            print!("{body}");
         }
     }
+}
+
+/// 面板行：user@host 标题、分隔线、蓝色 key 的 key:value、空行、两行色块
+fn panel_rows(info: &sysinfo::FetchInfo) -> Vec<String> {
+    let mut rows = vec![
+        format!(
+            "\x1b[1;32m{}\x1b[0m@\x1b[1;34m{}\x1b[0m",
+            info.user, info.host
+        ),
+        "-".repeat(info.user.chars().count() + 1 + info.host.chars().count()),
+    ];
+    for (k, v) in &info.rows {
+        rows.push(format!("\x1b[1;34m{k}:\x1b[0m {v}"));
+    }
+    rows.push(String::new());
+    for base in [30u8, 90] {
+        let blocks: Vec<String> = (0..8u8)
+            .map(|i| format!("\x1b[{base}m███\x1b[0m", base = base + i))
+            .collect();
+        rows.push(blocks.join(" "));
+    }
+    rows
+}
+
+/// 精灵与面板逐行拼接：精灵侧统一垫到 sprite_w，矮的一侧自然延续到末尾
+fn compose(sprite: &str, panel: Vec<String>, sprite_w: usize, gap: usize) -> String {
+    let sprite_lines: Vec<&str> = sprite.lines().collect();
+    let mut out = String::new();
+    for i in 0..sprite_lines.len().max(panel.len()) {
+        let left = match sprite_lines.get(i) {
+            Some(l) => {
+                let lw = visible_width(l);
+                let mut s = String::with_capacity(sprite_w);
+                s.push_str(l);
+                if lw < sprite_w {
+                    s.push_str(&" ".repeat(sprite_w - lw));
+                }
+                s
+            }
+            None => " ".repeat(sprite_w),
+        };
+        out.push_str(&left);
+        if let Some(p) = panel.get(i) {
+            out.push_str(&" ".repeat(gap));
+            out.push_str(p);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -467,5 +535,40 @@ mod tests {
         let pikachu = sprite_cols(&index, "small", "regular", "pikachu");
         assert!(pikachu.is_some_and(|w| (1..=68).contains(&w)));
         assert_eq!(sprite_cols(&index, "small", "regular", "不存在"), None);
+    }
+
+    #[test]
+    fn compose_extends_shorter_side() {
+        let panel = vec![
+            "OS: x".to_string(),
+            "Kernel: y".to_string(),
+            "Uptime: z".to_string(),
+        ];
+        let out = compose("aa\nbb\n", panel, 2, 2);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, ["aa  OS: x", "bb  Kernel: y", "    Uptime: z"]);
+    }
+
+    #[test]
+    fn compose_sprite_taller() {
+        let panel = vec!["OS: x".to_string()];
+        let out = compose("aa\nbb\n", panel, 2, 2);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, ["aa  OS: x", "bb"]);
+    }
+
+    #[test]
+    fn panel_structure() {
+        let info = sysinfo::FetchInfo {
+            user: "u".into(),
+            host: "h".into(),
+            rows: vec![("OS".into(), "x".into())],
+        };
+        let rows = panel_rows(&info);
+        assert_eq!(rows.len(), 6); // title, 分隔线, kv, 空行, 色块×2
+        assert!(rows[0].starts_with("\x1b[1;32mu\x1b[0m@\x1b[1;34mh"));
+        assert_eq!(rows[1], "---");
+        assert!(rows[2].starts_with("\x1b[1;34mOS:"));
+        assert!(rows[5].contains("███"));
     }
 }

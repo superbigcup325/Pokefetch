@@ -1,6 +1,6 @@
 # pokefetch
 
-Rust 写的宝可梦 fetch：随机或指定在终端打印一只宝可梦字符画。
+Rust 写的宝可梦 fetch：终端里的精灵字符画 + 系统信息面板，也可作 fastfetch 的 logo 源。
 
 素材来自 [pokemon-colorscripts](https://gitlab.com/phoneybadger/pokemon-colorscripts)（MIT），
 已快照到 `assets/`，编译期把 ANSI 文本编码为调色板格子数组并逐精灵 zstd 压缩内嵌
@@ -10,11 +10,15 @@ Rust 写的宝可梦 fetch：随机或指定在终端打印一只宝可梦字符
 ## 用法
 
 ```
-pokefetch              # 随机一只（1/128 概率 shiny）
-pokefetch -n pikachu   # 指定
+pokefetch              # 精灵 + 系统面板（fetch 式，1/128 概率 shiny）
+pokefetch --no-panel   # 纯精灵打印
+pokefetch -n pikachu   # 指定（形态传全名如 charizard-mega-x）
 pokefetch -r 1-3       # 1~3 代随机
-pokefetch -s -b        # 闪光 + 大图
+pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
 ```
+
+面板信息读自 /proc、/sys 与环境变量（OS/Host/Kernel/Uptime/Packages/Shell/DE/
+Terminal/CPU/Memory + 色块），零外部依赖，取不到的行自动跳过。
 
 ## 接入 fastfetch
 
