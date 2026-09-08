@@ -447,12 +447,20 @@ fn panel_rows(info: &sysinfo::FetchInfo) -> Vec<String> {
         rows.push(format!("\x1b[1;34m{k}:\x1b[0m {v}"));
     }
     rows.push(String::new());
-    for base in [30u8, 90] {
-        let blocks: Vec<String> = (0..8u8)
-            .map(|i| format!("\x1b[{base}m███\x1b[0m", base = base + i))
-            .collect();
-        rows.push(blocks.join(" "));
-    }
+    // 色块与 fastfetch 同款：背景色空格条，每色 3 格无缝拼接；
+    // 亮色行带 blink 属性（fastfetch 的兼容技巧），行尾 ESC[m 复位
+    rows.push(format!(
+        "{}\x1b[m",
+        (40u8..48)
+            .map(|c| format!("\x1b[{c}m   "))
+            .collect::<String>()
+    ));
+    rows.push(format!(
+        "\x1b[5m{}\x1b[m",
+        (100u8..108)
+            .map(|c| format!("\x1b[{c}m   "))
+            .collect::<String>()
+    ));
     rows
 }
 
@@ -569,6 +577,8 @@ mod tests {
         assert!(rows[0].starts_with("\x1b[1;32mu\x1b[0m@\x1b[1;34mh"));
         assert_eq!(rows[1], "---");
         assert!(rows[2].starts_with("\x1b[1;34mOS:"));
-        assert!(rows[5].contains("███"));
+        assert!(rows[4].starts_with("\x1b[40m   "));
+        assert!(rows[4].ends_with("\x1b[m"));
+        assert!(rows[5].starts_with("\x1b[5m\x1b[100m   "));
     }
 }
