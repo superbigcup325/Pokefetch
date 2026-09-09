@@ -17,7 +17,7 @@ include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
 use std::io::Read;
 
-use canvas::{compose, pad_canvas, visible_width};
+use canvas::{compose, max_visible_width, pad_canvas};
 use cli::Args;
 use panel::panel_rows;
 use ruzstd::decoding::StreamingDecoder;
@@ -334,11 +334,15 @@ fn main() {
             }
         }
     };
+    // 最大可见行宽全程只扫一次：垫宽用（居中偏移），精灵区宽由它派生——
+    // 垫宽后 = max(原宽, 画布宽)（超宽行不裁、原样伸出）
+    let raw_w = max_visible_width(&ansi);
     let ansi = if canvas_w > 0 {
-        pad_canvas(&ansi, canvas_w, center)
+        pad_canvas(&ansi, canvas_w, center, raw_w)
     } else {
         ansi
     };
+    let sprite_w = raw_w.max(canvas_w);
 
     // 面板只挂 stdout 直打印路径；--raw / 写文件（含 --logo-cache）恒为纯精灵
     let panel = on_stdout && !no_panel && !raw;
@@ -354,7 +358,6 @@ fn main() {
             let body = if panel {
                 let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
                 let info = sysinfo::collect(&names);
-                let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
                 // 行宽预算：默认集在窄终端下截值防折行（显式 --modules 硬打不裁）；
                 // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）
                 let budget = match (modules.is_none(), term) {

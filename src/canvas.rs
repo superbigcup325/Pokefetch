@@ -18,11 +18,16 @@ pub(crate) fn visible_width(line: &str) -> usize {
     w
 }
 
+/// 全图最大可见行宽（调用方与 pad_canvas 共享，整个输出管线只扫一次）
+pub(crate) fn max_visible_width(ansi: &str) -> usize {
+    ansi.lines().map(visible_width).max().unwrap_or(0)
+}
+
 /// 画布：精灵整体在画布内左锚或居中，每行右垫空格到画布宽
 /// （fastfetch 面板列位由此稳定）；行宽已达画布的行不动（精灵超宽时自然伸出，永不裁剪）。
-/// 居中按精灵整体最大宽计算统一左偏移，逐行对齐不被打散
-pub(crate) fn pad_canvas(ansi: &str, w: usize, center: bool) -> String {
-    let max_w = ansi.lines().map(visible_width).max().unwrap_or(0);
+/// 居中按精灵整体最大宽计算统一左偏移，逐行对齐不被打散；
+/// max_w 由调用方传入（即 max_visible_width 的结果），避免重复扫描
+pub(crate) fn pad_canvas(ansi: &str, w: usize, center: bool, max_w: usize) -> String {
     let left = if center {
         w.saturating_sub(max_w) / 2
     } else {
@@ -83,26 +88,26 @@ mod tests {
 
     #[test]
     fn pad_left_anchors_right_pad() {
-        assert_eq!(pad_canvas("█\n██\n", 4, false), "█   \n██  \n");
+        assert_eq!(pad_canvas("█\n██\n", 4, false, 2), "█   \n██  \n");
     }
 
     #[test]
     fn pad_centers_with_uniform_offset() {
         // 精灵最大宽 2，画布 5：统一左偏移 1，逐行右垫到 5
-        assert_eq!(pad_canvas("█\n██\n", 5, true), " █   \n ██  \n");
+        assert_eq!(pad_canvas("█\n██\n", 5, true, 2), " █   \n ██  \n");
     }
 
     #[test]
     fn pad_skips_wide_lines() {
         // 行宽已达画布：不垫（精灵超宽自然伸出）
-        assert_eq!(pad_canvas("████\n", 2, false), "████\n");
-        assert_eq!(pad_canvas("████\n", 2, true), "████\n");
+        assert_eq!(pad_canvas("████\n", 2, false, 4), "████\n");
+        assert_eq!(pad_canvas("████\n", 2, true, 4), "████\n");
     }
 
     #[test]
     fn pad_zero_is_noop() {
-        assert_eq!(pad_canvas("█\n", 0, false), "█\n");
-        assert_eq!(pad_canvas("█\n", 0, true), "█\n");
+        assert_eq!(pad_canvas("█\n", 0, false, 1), "█\n");
+        assert_eq!(pad_canvas("█\n", 0, true, 1), "█\n");
     }
 
     #[test]
