@@ -1,8 +1,13 @@
 // pokefetch —— 终端里的宝可梦 fetch：精灵字符画 + 系统信息面板
 // 素材编译期内嵌：build.rs 编码 + 压缩生成 OUT_DIR/sprites.bin（key 排序，运行时二分）
-// 编解码核心见 codec.rs（build.rs 与运行时共用）
+// 编解码核心见 codec.rs（build.rs 与运行时共用）；
+// CLI 表面在 cli.rs，画布几何在 canvas.rs，面板渲染在 panel.rs，
+// 系统信息数据层在 sysinfo/（注册表 + 数据域子模块）
+mod canvas;
+mod cli;
 mod codec;
 mod ffi;
+mod panel;
 mod sysinfo;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
@@ -12,7 +17,9 @@ include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
 use std::io::Read;
 
-use clap::{CommandFactory, FromArgMatches, Parser};
+use canvas::{compose, pad_canvas, visible_width};
+use cli::Args;
+use panel::panel_rows;
 use ruzstd::decoding::StreamingDecoder;
 
 const NAMES_TXT: &str = include_str!("../assets/names.txt");
@@ -23,20 +30,6 @@ const SHINY_RATE: u64 = 128;
 /// 默认画布宽（列）：small 输出左锚、右垫到该宽度，fastfetch 面板列位由此稳定；
 /// large 默认不垫（-b 是刻意行为）。--canvas 可覆盖，0 = 关闭
 const DEFAULT_CANVAS: usize = 40;
-
-/// 世代 → 图鉴编号区间（1-based，含端点）；names.txt 行号 = 图鉴编号；
-/// gen 8 到 898 与上游对齐（899-905 洗翠新种不落入任何 -r 区间，仅 -n 可达）
-const GENERATIONS: [(usize, usize); 9] = [
-    (1, 151),
-    (152, 251),
-    (252, 386),
-    (387, 493),
-    (494, 649),
-    (650, 721),
-    (722, 809),
-    (810, 898),
-    (906, 1025),
-];
 
 struct Rng(u64);
 
@@ -68,7 +61,7 @@ fn names() -> Vec<&'static str> {
     NAMES_TXT.lines().collect()
 }
 
-fn die(msg: &str) -> ! {
+pub(crate) fn die(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
 }
@@ -130,137 +123,6 @@ fn sprite_ansi(index: &[Entry<'static>], name: &str, shiny: bool, big: bool) -> 
     }
 }
 
-/// "1" / "1-3" / "1,3,6" → 图鉴编号区间列表
-fn parse_gens(spec: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    for part in spec.split(',') {
-        let (a, b) = part.split_once('-').unwrap_or((part, part));
-        let parsed = (a.trim().parse::<usize>(), b.trim().parse::<usize>());
-        let (Ok(i), Ok(j)) = parsed else {
-            die(&format!("无效世代: {spec}"));
-        };
-        if !(1..=GENERATIONS.len()).contains(&i) || !(1..=GENERATIONS.len()).contains(&j) || i > j {
-            die(&format!("无效世代: {spec}"));
-        }
-        ranges.push((GENERATIONS[i - 1].0, GENERATIONS[j - 1].1));
-    }
-    ranges
-}
-
-/// 模块名清单按给定列宽贪心折行（模块名均 ASCII），供 help 展示；
-/// 从 sysinfo 注册表派生，避免与 MODULES 手工双份漂移
-fn module_help_lines(width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for name in sysinfo::module_names() {
-        match lines.last_mut() {
-            Some(l) if l.chars().count() + 1 + name.len() <= width => {
-                l.push(' ');
-                l.push_str(name);
-            }
-            _ => lines.push(name.to_string()),
-        }
-    }
-    lines
-}
-
-/// 帮助尾部的动态段：fastfetch 对接 + 模块清单（注册表派生）+ 适配说明
-fn help_tail() -> String {
-    let mod_lines = module_help_lines(72)
-        .iter()
-        .map(|l| format!("  {l}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "fastfetch 对接:
-  --raw          只输出字符画本体（无名字行无面板）:
-                 fastfetch --data-raw \"$(pokefetch -r --raw)\"
-  -o, --output   字符画写入文件（stdout 不输出）
-  --logo-cache   写入 ~/.cache/pokefetch/logo.ans 并照常打印；
-                 配合仓库附带的 fastfetch.jsonc 使用（fastfetch --config）
-
-面板模块 (--modules 可选):
-{mod_lines}
-
-随机时自动跳过当前终端放不下的精灵；显式 -n/-b 不做干预、原样输出。
-面板信息来自 /proc、/sys 与环境变量，取不到的行自动跳过。"
-    )
-}
-
-#[derive(Parser)]
-#[command(
-    name = "pokefetch",
-    about = "终端里的宝可梦 fetch：精灵字符画 + 系统信息面板"
-)]
-struct Args {
-    /// 指定宝可梦（pikachu；形态配 -f，或直接传全名 charizard-mega-x）
-    #[arg(short, long)]
-    name: Option<String>,
-
-    /// 随机一只，可附加世代: 1 / 1-3 / 1,3,6
-    #[arg(short, long, num_args(0..=1), default_missing_value = "")]
-    random: Option<String>,
-
-    /// 从逗号分隔的名字列表中随机（如 pikachu,gengar）
-    #[arg(
-        long,
-        value_name = "列表",
-        conflicts_with_all = ["name", "random"]
-    )]
-    random_by_names: Option<String>,
-
-    /// 指定形态（-l 查名字，形态见 assets/pokemon.json，如 mega-x；需配 -n）
-    #[arg(short = 'f', long, requires = "name")]
-    form: Option<String>,
-
-    /// 强制闪光版（不带时随机有 1/128 概率出 shiny）
-    #[arg(short, long)]
-    shiny: bool,
-
-    /// 大尺寸字符画（默认 small）
-    #[arg(short, long)]
-    big: bool,
-
-    /// 画布宽度：左锚右垫到此列宽（0=关闭；默认 small 40、large 不垫）
-    #[arg(long, value_name = "列宽")]
-    canvas: Option<usize>,
-
-    /// 精灵在画布内居中（默认左锚）
-    #[arg(long)]
-    center: bool,
-
-    /// 只输出精灵，不带系统信息面板
-    #[arg(long)]
-    no_panel: bool,
-
-    /// 面板模块选择，逗号分隔（默认为精选集；未知模块报错）
-    #[arg(long, value_name = "列表")]
-    modules: Option<String>,
-
-    /// 显示精灵名字行（面板模式下默认不显示）
-    #[arg(long, conflicts_with = "no_title")]
-    title: bool,
-
-    /// 不显示名字行（纯精灵模式下默认显示）
-    #[arg(long)]
-    no_title: bool,
-
-    /// 只输出字符画本体（无名字行无面板），作 fastfetch logo 源
-    #[arg(long)]
-    raw: bool,
-
-    /// 字符画写入文件（stdout 不输出）
-    #[arg(short, long, value_name = "文件")]
-    output: Option<std::path::PathBuf>,
-
-    /// 写入 ~/.cache/pokefetch/logo.ans 并照常打印
-    #[arg(long)]
-    logo_cache: bool,
-
-    /// 列出全部名字
-    #[arg(short, long)]
-    list: bool,
-}
-
 /// -f/--form：校验形态存在，拼出素材名（regular 即本名）
 fn resolve_form(name: &str, form: &str) -> String {
     let Some(forms) = FORMS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f) else {
@@ -293,50 +155,6 @@ fn dex_number(name: &str) -> Option<usize> {
     }
 }
 
-/// 行的可见宽度（字形均单宽；跳过 \x1b[..m 转义段）
-fn visible_width(line: &str) -> usize {
-    let mut w = 0;
-    let mut esc = false;
-    for ch in line.chars() {
-        if esc {
-            if ch == 'm' {
-                esc = false;
-            }
-        } else if ch == '\x1b' {
-            esc = true;
-        } else {
-            w += 1;
-        }
-    }
-    w
-}
-
-/// 画布：精灵整体在画布内左锚或居中，每行右垫空格到画布宽
-/// （fastfetch 面板列位由此稳定）；行宽已达画布的行不动（精灵超宽时自然伸出，永不裁剪）。
-/// 居中按精灵整体最大宽计算统一左偏移，逐行对齐不被打散
-fn pad_canvas(ansi: &str, w: usize, center: bool) -> String {
-    let max_w = ansi.lines().map(visible_width).max().unwrap_or(0);
-    let left = if center {
-        w.saturating_sub(max_w) / 2
-    } else {
-        0
-    };
-    let mut out = String::with_capacity(ansi.len() + 16);
-    for line in ansi.lines() {
-        let lw = visible_width(line);
-        if left > 0 {
-            out.push_str(&" ".repeat(left));
-        }
-        out.push_str(line);
-        let used = left + lw;
-        if used < w {
-            out.push_str(&" ".repeat(w - used));
-        }
-        out.push('\n');
-    }
-    out
-}
-
 /// 默认 logo 缓存路径：$XDG_CACHE_HOME/pokefetch/logo.ans
 fn cache_logo_path() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
@@ -359,8 +177,7 @@ enum Dest {
 }
 
 fn main() {
-    let args = Args::command().after_help(help_tail()).get_matches();
-    let args = Args::from_arg_matches(&args).unwrap();
+    let args = cli::parse_args();
 
     if args.list {
         for n in names() {
@@ -477,7 +294,7 @@ fn main() {
             } else {
                 let (lo, hi) = match &gens {
                     Some(spec) => {
-                        let ranges = parse_gens(spec);
+                        let ranges = cli::parse_gens(spec);
                         ranges[rng.below(ranges.len())]
                     }
                     None => (1, all.len()),
@@ -537,13 +354,11 @@ fn main() {
             let body = if panel {
                 let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
                 let info = sysinfo::collect(&names);
+                let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
                 // 行宽预算：默认集在窄终端下截值防折行（显式 --modules 硬打不裁）；
                 // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）
                 let budget = match (modules.is_none(), term) {
-                    (true, Some((_, cols))) => {
-                        let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
-                        Some(cols.saturating_sub(sprite_w + 3))
-                    }
+                    (true, Some((_, cols))) => Some(cols.saturating_sub(sprite_w + 3)),
                     _ => None,
                 };
                 let mut rows = panel_rows(&info, budget);
@@ -551,7 +366,6 @@ fn main() {
                 if let Some(num) = dex_number(&chosen) {
                     rows.insert(2, format!("\x1b[1;34mDex:\x1b[0m #{num:03}"));
                 }
-                let sprite_w = ansi.lines().map(visible_width).max().unwrap_or(0);
                 compose(&ansi, rows, sprite_w, 3)
             } else {
                 ansi
@@ -571,121 +385,9 @@ fn main() {
     }
 }
 
-/// 面板行：user@host 标题、分隔线、蓝色 key 的 key:value、空行、两行色块。
-/// budget（面板可用列数，None = 不裁）超限时截值加 …，有截断则在模块行尾
-/// 追加一行暗色注释说明，防止用户把残缺值当成完整数据
-fn panel_rows(info: &sysinfo::FetchInfo, budget: Option<usize>) -> Vec<String> {
-    let mut rows = vec![
-        format!(
-            "\x1b[1;32m{}\x1b[0m@\x1b[1;34m{}\x1b[0m",
-            info.user, info.host
-        ),
-        "-".repeat(info.user.chars().count() + 1 + info.host.chars().count()),
-    ];
-    let mut truncated = 0usize;
-    for (k, v) in &info.rows {
-        let mut shown = v.as_str();
-        let mut cut = false;
-        if let Some(budget) = budget {
-            // key 加 ": " 的可见宽度，剩余给值；1 列留给 …
-            let avail = budget.saturating_sub(k.chars().count() + 2);
-            if v.chars().count() > avail {
-                let end = v
-                    .char_indices()
-                    .nth(avail.saturating_sub(1))
-                    .map(|(i, _)| i)
-                    .unwrap_or(v.len());
-                shown = &v[..end];
-                cut = true;
-                truncated += 1;
-            }
-        }
-        rows.push(format!(
-            "\x1b[1;34m{k}:\x1b[0m {shown}{}",
-            if cut { "…" } else { "" }
-        ));
-    }
-    if truncated > 0 {
-        rows.push(format!("\x1b[2m※ {truncated} 行因终端宽度截断\x1b[0m"));
-    }
-    rows.push(String::new());
-    // 色块与 fastfetch 同款：背景色空格条，每色 3 格无缝拼接；
-    // 亮色行带 blink 属性（fastfetch 的兼容技巧），行尾 ESC[m 复位
-    rows.push(format!(
-        "{}\x1b[m",
-        (40u8..48)
-            .map(|c| format!("\x1b[{c}m   "))
-            .collect::<String>()
-    ));
-    rows.push(format!(
-        "\x1b[5m{}\x1b[m",
-        (100u8..108)
-            .map(|c| format!("\x1b[{c}m   "))
-            .collect::<String>()
-    ));
-    rows
-}
-
-/// 精灵与面板逐行拼接：精灵侧统一垫到 sprite_w，矮的一侧自然延续到末尾
-fn compose(sprite: &str, panel: Vec<String>, sprite_w: usize, gap: usize) -> String {
-    let sprite_lines: Vec<&str> = sprite.lines().collect();
-    let mut out = String::new();
-    for i in 0..sprite_lines.len().max(panel.len()) {
-        let left = match sprite_lines.get(i) {
-            Some(l) => {
-                let lw = visible_width(l);
-                let mut s = String::with_capacity(sprite_w);
-                s.push_str(l);
-                if lw < sprite_w {
-                    s.push_str(&" ".repeat(sprite_w - lw));
-                }
-                s
-            }
-            None => " ".repeat(sprite_w),
-        };
-        out.push_str(&left);
-        if let Some(p) = panel.get(i) {
-            out.push_str(&" ".repeat(gap));
-            out.push_str(p);
-        }
-        out.push('\n');
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn visible_width_skips_escapes() {
-        assert_eq!(visible_width("ab\x1b[38;2;1;2;3mcd\x1b[0m"), 4);
-        assert_eq!(visible_width(""), 0);
-    }
-
-    #[test]
-    fn pad_left_anchors_right_pad() {
-        assert_eq!(pad_canvas("█\n██\n", 4, false), "█   \n██  \n");
-    }
-
-    #[test]
-    fn pad_centers_with_uniform_offset() {
-        // 精灵最大宽 2，画布 5：统一左偏移 1，逐行右垫到 5
-        assert_eq!(pad_canvas("█\n██\n", 5, true), " █   \n ██  \n");
-    }
-
-    #[test]
-    fn pad_skips_wide_lines() {
-        // 行宽已达画布：不垫（精灵超宽自然伸出）
-        assert_eq!(pad_canvas("████\n", 2, false), "████\n");
-        assert_eq!(pad_canvas("████\n", 2, true), "████\n");
-    }
-
-    #[test]
-    fn pad_zero_is_noop() {
-        assert_eq!(pad_canvas("█\n", 0, false), "█\n");
-        assert_eq!(pad_canvas("█\n", 0, true), "█\n");
-    }
 
     #[test]
     fn index_has_known_sprites() {
@@ -706,73 +408,6 @@ mod tests {
         assert!(pikachu.is_some_and(|w| (1..=68).contains(&w)));
         assert_eq!(sprite_cols(&index, "small", "regular", "不存在"), None);
     }
-
-    #[test]
-    fn compose_extends_shorter_side() {
-        let panel = vec![
-            "OS: x".to_string(),
-            "Kernel: y".to_string(),
-            "Uptime: z".to_string(),
-        ];
-        let out = compose("aa\nbb\n", panel, 2, 2);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines, ["aa  OS: x", "bb  Kernel: y", "    Uptime: z"]);
-    }
-
-    #[test]
-    fn compose_sprite_taller() {
-        let panel = vec!["OS: x".to_string()];
-        let out = compose("aa\nbb\n", panel, 2, 2);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines, ["aa  OS: x", "bb"]);
-    }
-
-    #[test]
-    fn panel_structure() {
-        let info = sysinfo::FetchInfo {
-            user: "u".into(),
-            host: "h".into(),
-            rows: vec![("OS".into(), "x".into())],
-        };
-        let rows = panel_rows(&info, None);
-        assert_eq!(rows.len(), 6); // title, 分隔线, kv, 空行, 色块×2
-        assert!(rows[0].starts_with("\x1b[1;32mu\x1b[0m@\x1b[1;34mh"));
-        assert_eq!(rows[1], "---");
-        assert!(rows[2].starts_with("\x1b[1;34mOS:"));
-        assert!(rows[4].starts_with("\x1b[40m   "));
-        assert!(rows[4].ends_with("\x1b[m"));
-        assert!(rows[5].starts_with("\x1b[5m\x1b[100m   "));
-    }
-
-    #[test]
-    fn panel_budget_truncation() {
-        let info = sysinfo::FetchInfo {
-            user: "u".into(),
-            host: "h".into(),
-            rows: vec![
-                ("OS".into(), "short".into()),
-                ("Battery".into(), "35% [Discharging] (L21B4PC0)".into()),
-            ],
-        };
-        // 预算 15：OS 行 "OS: short"=9 不裁；Battery 行 key+2=9，值留 6 列（5+…）
-        let rows = panel_rows(&info, Some(15));
-        assert!(rows[2].ends_with("short"));
-        assert!(rows[3].ends_with("…"));
-        assert!(!rows[3].contains("Discharging"));
-        // 截断注释行插在空行之前，注明行数
-        assert!(rows[4].contains("※ 1 行因终端宽度截断"));
-        assert_eq!(rows.len(), 8); // title, 分隔线, kv×2, 注释, 空行, 色块×2
-        // 预算极小：两个值都只剩 …（值位于复位序列之后，只能按尾部 … 断言）
-        let rows = panel_rows(&info, Some(3));
-        assert!(rows[2].ends_with("…") && rows[2].contains("OS:"));
-        assert!(rows[3].ends_with("…") && rows[3].contains("Battery:"));
-        assert!(rows[4].contains("※ 2 行"));
-    }
-}
-
-#[cfg(test)]
-mod dex_tests {
-    use super::*;
 
     #[test]
     fn dex_numbers() {
