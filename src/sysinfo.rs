@@ -43,12 +43,13 @@ const MODULES: &[(&str, &str, Fetcher)] = &[
     ("swap", "Swap", swap),
     ("disk", "Disk", disk),
     ("localip", "Local IP", local_ip),
+    ("localip-all", "Local IP (all)", local_ip_all),
     ("battery", "Battery", battery),
     ("load", "Load", load),
     ("locale", "Locale", locale),
 ];
 
-/// 默认集（面板精选；board/bios 与 KDE 主题五件套经 --modules 点名启用）
+/// 默认集（面板精选；board/bios 与 localip-all、KDE 主题五件套经 --modules 点名启用）
 const DEFAULT_SELECTED: &[&str] = &[
     "os", "host", "kernel", "uptime", "packages", "shell", "de", "wm", "terminal", "gpu", "cpu",
     "memory", "swap", "disk", "localip", "battery", "load", "locale",
@@ -633,9 +634,59 @@ fn fs_type_of(mountinfo: &str, mount: &str) -> Option<String> {
     None
 }
 
-/// Local IP：SIOCGIFCONF/SIOCGIFNETMASK（FFI 声明见 ffi.rs），
-/// 列出非 loopback 的 IPv4 接口
+/// Local IP 默认只列物理网卡：隧道/容器等虚拟接口按名过滤，行宽不随 VPN 失控；
+/// 过滤后为空（纯隧道环境）回退全量，超过预算项数以 …+k 截尾
+const LOCALIP_BUDGET: usize = 3;
+
+/// 隧道/虚拟网络接口名前缀（VPN、容器网桥、veth 对端、虚拟机宿主桥等）；
+/// 保守清单，遇到新的 VPN 工具可再扩
+const VIRTUAL_IF_PREFIXES: [&str; 20] = [
+    "tun",
+    "tap",
+    "wg",
+    "zt",
+    "tailscale",
+    "docker",
+    "virbr",
+    "veth",
+    "br-",
+    "vmnet",
+    "vboxnet",
+    "ppp",
+    "ipsec",
+    "nordlynx",
+    "proton",
+    "mullvad",
+    "podman",
+    "cni",
+    "flannel",
+    "cali",
+];
+
+fn is_virtual_if(name: &str) -> bool {
+    VIRTUAL_IF_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// 超预算截尾：前 limit 项 + "…+k"
+fn join_with_budget(list: &[String], limit: usize) -> String {
+    if list.len() <= limit {
+        list.join(", ")
+    } else {
+        format!("{}, …+{}", list[..limit].join(", "), list.len() - limit)
+    }
+}
+
+/// Local IP：SIOCGIFCONF/SIOCGIFNETMASK（FFI 声明见 ffi.rs）；
+/// localip = 仅物理网卡（含预算截尾），localip-all = 全量
 fn local_ip() -> Option<String> {
+    local_ip_impl(true)
+}
+
+fn local_ip_all() -> Option<String> {
+    local_ip_impl(false)
+}
+
+fn local_ip_impl(only_physical: bool) -> Option<String> {
     let fd = unsafe {
         ffi::socket(2 /* AF_INET */, 2 /* SOCK_DGRAM */, 0)
     };
@@ -670,7 +721,7 @@ fn local_ip() -> Option<String> {
                 return None;
             }
         };
-        let mut parts: Vec<String> = Vec::new();
+        let mut items: Vec<(String, String)> = Vec::new();
         for (name, ip) in entries {
             if name == "lo" {
                 continue;
@@ -691,9 +742,30 @@ fn local_ip() -> Option<String> {
                 continue;
             }
             let mask = [req.data[4], req.data[5], req.data[6], req.data[7]];
-            parts.push(format!("{name}: {}/{}", ipv4_str(ip), prefix_of(mask)));
+            let entry = format!("{name}: {}/{}", ipv4_str(ip), prefix_of(mask));
+            items.push((name, entry));
         }
-        (!parts.is_empty()).then(|| parts.join(", "))
+        let list: Vec<String> = if only_physical {
+            let physical: Vec<String> = items
+                .iter()
+                .filter(|(n, _)| !is_virtual_if(n))
+                .map(|(_, s)| s.clone())
+                .collect();
+            if physical.is_empty() {
+                items.into_iter().map(|(_, s)| s).collect()
+            } else {
+                physical
+            }
+        } else {
+            items.into_iter().map(|(_, s)| s).collect()
+        };
+        (!list.is_empty()).then(|| {
+            if only_physical {
+                join_with_budget(&list, LOCALIP_BUDGET)
+            } else {
+                list.join(", ")
+            }
+        })
     })();
     unsafe { ffi::close(fd) };
     work
@@ -978,5 +1050,43 @@ mod tests {
         // 未知模块报错并附可用名单
         let err = resolve(Some(&["nope".to_string()])).unwrap_err();
         assert!(err.starts_with("未知模块: nope"));
+    }
+
+    #[test]
+    fn localip_virtual_if_names() {
+        assert!(!is_virtual_if("enp49s0"));
+        assert!(!is_virtual_if("wlan0"));
+        assert!(!is_virtual_if("eth0"));
+        assert!(is_virtual_if("tun0"));
+        assert!(is_virtual_if("wg0"));
+        assert!(is_virtual_if("ztfcazsbm3"));
+        assert!(is_virtual_if("tailscale0"));
+        assert!(is_virtual_if("docker0"));
+        assert!(is_virtual_if("veth8a2c1b@if5"));
+        assert!(is_virtual_if("br-1a2b3c4d"));
+    }
+
+    #[test]
+    fn localip_budget_truncation() {
+        let two: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(join_with_budget(&two, 3), "a, b");
+        let five: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(join_with_budget(&five, 3), "a, b, c, …+2");
+    }
+
+    #[test]
+    fn localip_all_module_registered() {
+        // 注册表里 localip 与 localip-all 并存，后者不在默认集
+        let names: Vec<&str> = module_names().collect();
+        assert!(names.contains(&"localip") && names.contains(&"localip-all"));
+        assert!(DEFAULT_SELECTED.contains(&"localip"));
+        assert!(!DEFAULT_SELECTED.contains(&"localip-all"));
+        assert_eq!(
+            resolve(Some(&["localip-all".to_string()])).unwrap(),
+            vec!["localip-all"]
+        );
     }
 }
