@@ -24,8 +24,9 @@ const SHINY_RATE: u64 = 128;
 /// large 默认不垫（-b 是刻意行为）。--canvas 可覆盖，0 = 关闭
 const DEFAULT_CANVAS: usize = 40;
 
-/// 世代 → 图鉴编号区间（1-based，含端点）；names.txt 行号 = 图鉴编号
-const GENERATIONS: [(usize, usize); 8] = [
+/// 世代 → 图鉴编号区间（1-based，含端点）；names.txt 行号 = 图鉴编号；
+/// gen 8 到 898 与上游对齐（899-905 洗翠新种不落入任何 -r 区间，仅 -n 可达）
+const GENERATIONS: [(usize, usize); 9] = [
     (1, 151),
     (152, 251),
     (252, 386),
@@ -34,6 +35,7 @@ const GENERATIONS: [(usize, usize); 8] = [
     (650, 721),
     (722, 809),
     (810, 898),
+    (906, 1025),
 ];
 
 struct Rng(u64);
@@ -137,7 +139,10 @@ fn parse_gens(spec: &str) -> Vec<(usize, usize)> {
         let (Ok(i), Ok(j)) = parsed else {
             die(&format!("无效世代: {spec}"));
         };
-        if !(1..=8).contains(&i) || !(1..=8).contains(&j) || i > j {
+        if !(1..=GENERATIONS.len()).contains(&i)
+            || !(1..=GENERATIONS.len()).contains(&j)
+            || i > j
+        {
             die(&format!("无效世代: {spec}"));
         }
         ranges.push((GENERATIONS[i - 1].0, GENERATIONS[j - 1].1));
@@ -402,10 +407,11 @@ fn main() {
         Some("") | None => None,
         Some(spec) => Some(spec.to_string()),
     };
-    let by_names: Option<Vec<&str>> = random_by_names.as_deref().map(|s| {
+    let by_names: Option<Vec<String>> = random_by_names.as_deref().map(|s| {
         s.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(String::from)
             .collect()
     });
     let modules: Option<Vec<String>> = modules.map(|s| {
@@ -462,16 +468,15 @@ fn main() {
             let size = if big { "large" } else { "small" };
             let variant = if shiny { "shiny" } else { "regular" };
             let all = names();
-            let mut pool: Vec<&'static str> = if let Some(list) = &by_names {
-                for n in list {
-                    if !all.contains(n) {
+            let mut pool: Vec<&str> = if let Some(list) = &by_names {
+                // 校验走索引键（与 -n 同口径，形态全名可用），不只限 names.txt 基础名
+                let picked: Vec<&str> = list.iter().map(String::as_str).collect();
+                for n in &picked {
+                    if sprite_cols(&index, size, variant, n).is_none() {
                         die(&format!("没有这只宝可梦: {n}"));
                     }
                 }
-                list.iter()
-                    .map(|n| all.iter().find(|a| *a == n).unwrap())
-                    .copied()
-                    .collect()
+                picked
             } else {
                 let (lo, hi) = match &gens {
                     Some(spec) => {
@@ -484,7 +489,7 @@ fn main() {
             };
             // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
             if let Some((_, cols)) = term {
-                let fits: Vec<&'static str> = pool
+                let fits: Vec<&str> = pool
                     .iter()
                     .copied()
                     .filter(|n| sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols))
