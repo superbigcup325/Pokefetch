@@ -3,6 +3,7 @@
 // 编解码核心见 codec.rs（build.rs 与运行时共用）；
 // CLI 表面在 cli.rs，画布几何在 canvas.rs，面板渲染在 panel.rs，
 // 系统信息数据层在 sysinfo/（注册表 + 数据域子模块）
+mod anim;
 mod canvas;
 mod cli;
 mod codec;
@@ -15,7 +16,7 @@ static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 // -f/--form 的形态表：build.rs 从 assets/pokemon.json 生成
 include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use canvas::{compose, max_visible_width, pad_canvas};
 use cli::Args;
@@ -179,6 +180,15 @@ enum Dest {
 fn main() {
     let args = cli::parse_args();
 
+    // 维护命令：帧目录 → anim.bin（与常规输出互斥，打完即走）
+    if let Some(dir) = &args.anim_pack {
+        let Some(out) = &args.output else {
+            die("--anim-pack 需要 -o 指定输出文件，如 -o ~/.local/share/pokefetch/anim.bin");
+        };
+        anim::pack(dir, out);
+        return;
+    }
+
     if args.list {
         for n in names() {
             println!("{n}");
@@ -205,6 +215,9 @@ fn main() {
         raw,
         output,
         logo_cache,
+        animated,
+        loops,
+        anim_pack: _,
         list: _,
     } = args;
 
@@ -318,6 +331,31 @@ fn main() {
 
     let ansi = sprite_ansi(&index, &chosen, shiny, big);
 
+    // 动画路径：--animated 且 stdout 直连终端且数据命中；任一不满足回退静态图。
+    // fastfetch 对接路径（--raw/-o/--logo-cache）被 clap 互斥挡住，恒为静态
+    let animation = if animated {
+        if !ffi::stdout_is_tty() {
+            eprintln!("pokefetch: stdout 不是终端，动画回退静态图");
+            None
+        } else if let Some(data) = anim::AnimData::load() {
+            let variant = if shiny { "shiny" } else { "regular" };
+            match data.lookup(&format!("{variant}/{chosen}")) {
+                Some(a) => Some(a),
+                None => {
+                    eprintln!("pokefetch: 动画数据里没有 {chosen}，回退静态图");
+                    None
+                }
+            }
+        } else {
+            eprintln!(
+                "pokefetch: 未找到动画数据（POKEFETCH_ANIM 或 ~/.local/share/pokefetch/anim.bin），回退静态图"
+            );
+            None
+        }
+    } else {
+        None
+    };
+
     // 画布：显式 --canvas 原样生效（两尺寸都垫、不随终端收窄）；
     // 默认 small=40 并随终端收窄，large 不垫
     let canvas_w = match canvas {
@@ -335,12 +373,27 @@ fn main() {
         }
     };
     // 最大可见行宽全程只扫一次：垫宽用（居中偏移），精灵区宽由它派生——
-    // 垫宽后 = max(原宽, 画布宽)（超宽行不裁、原样伸出）
-    let raw_w = max_visible_width(&ansi);
-    let ansi = if canvas_w > 0 {
-        pad_canvas(&ansi, canvas_w, center, raw_w)
-    } else {
-        ansi
+    // 垫宽后 = max(原宽, 画布宽)（超宽行不裁、原样伸出）；
+    // 动画按全帧联合最大宽算统一偏移，帧间不抖
+    let raw_w = match &animation {
+        Some(a) => a
+            .frames
+            .iter()
+            .map(|f| max_visible_width(f))
+            .max()
+            .unwrap_or(0),
+        None => max_visible_width(&ansi),
+    };
+    let pad = |s: &str| {
+        if canvas_w > 0 {
+            pad_canvas(s, canvas_w, center, raw_w)
+        } else {
+            s.to_string()
+        }
+    };
+    let rendered: Vec<String> = match &animation {
+        Some(a) => a.frames.iter().map(|f| pad(f)).collect(),
+        None => vec![pad(&ansi)],
     };
     let sprite_w = raw_w.max(canvas_w);
 
@@ -350,31 +403,40 @@ fn main() {
     // 回显默认显示；--title/--no-title 显式覆盖
     let show_title = title.unwrap_or(!raw && !(on_stdout && panel));
 
+    // 面板行只收集一次，静态打印与动画逐帧复用（动画时面板保持静态）
+    let panel_rows_v = if panel {
+        let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
+        let info = sysinfo::collect(&names);
+        // 行宽预算：默认集在窄终端下截值防折行（显式 --modules 硬打不裁）；
+        // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）
+        let budget = match (modules.is_none(), term) {
+            (true, Some((_, cols))) => Some(cols.saturating_sub(sprite_w + 3)),
+            _ => None,
+        };
+        let mut rows = panel_rows(&info, budget);
+        // 图鉴编号行：names.txt 行号即编号，紧跟分隔线
+        if let Some(num) = dex_number(&chosen) {
+            rows.insert(2, format!("\x1b[1;34mDex:\x1b[0m #{num:03}"));
+        }
+        Some(rows)
+    } else {
+        None
+    };
+
     if show_title && (on_stdout || echo) {
         println!("{chosen}{}", if shiny { " (shiny)" } else { "" });
     }
     match dest {
-        Dest::Stdout => {
-            let body = if panel {
-                let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
-                let info = sysinfo::collect(&names);
-                // 行宽预算：默认集在窄终端下截值防折行（显式 --modules 硬打不裁）；
-                // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）
-                let budget = match (modules.is_none(), term) {
-                    (true, Some((_, cols))) => Some(cols.saturating_sub(sprite_w + 3)),
-                    _ => None,
+        Dest::Stdout => match &animation {
+            Some(a) => play(a, &rendered, panel_rows_v.as_deref(), sprite_w, loops),
+            None => {
+                let body = match panel_rows_v {
+                    Some(rows) => compose(&rendered[0], rows, sprite_w, 3),
+                    None => rendered[0].clone(),
                 };
-                let mut rows = panel_rows(&info, budget);
-                // 图鉴编号行：names.txt 行号即编号，紧跟分隔线
-                if let Some(num) = dex_number(&chosen) {
-                    rows.insert(2, format!("\x1b[1;34mDex:\x1b[0m #{num:03}"));
-                }
-                compose(&ansi, rows, sprite_w, 3)
-            } else {
-                ansi
-            };
-            print!("{body}");
-        }
+                print!("{body}");
+            }
+        },
         Dest::File { path, echo } => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -383,6 +445,50 @@ fn main() {
             std::fs::write(&path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
             if echo {
                 print!("{ansi}");
+            }
+        }
+    }
+}
+
+/// 动画播放：面板/名字行在块外保持静态，帧循环只覆写精灵+面板整行区
+/// （光标上移到块首重打，行已按画布垫齐，无闪烁）。默认无限循环；
+/// stdin 为 tty 且未指定 --loops 时进原始模式监听 q/Esc/Ctrl-C 退出
+fn play(
+    animation: &anim::Animation,
+    frames: &[String],
+    panel: Option<&[String]>,
+    sprite_w: usize,
+    loops: Option<usize>,
+) {
+    let bodies: Vec<String> = frames
+        .iter()
+        .map(|f| match panel {
+            Some(p) => compose(f, p.to_vec(), sprite_w, 3),
+            None => f.clone(),
+        })
+        .collect();
+    let rows = bodies[0].lines().count();
+    let mut out = std::io::stdout().lock();
+    let raw = if loops.is_none() && ffi::stdin_is_tty() {
+        ffi::RawMode::enable()
+    } else {
+        None
+    };
+    'rounds: for round in 0..loops.unwrap_or(usize::MAX) {
+        for (i, body) in bodies.iter().enumerate() {
+            if round > 0 || i > 0 {
+                // 光标回到本块首行（块尾以 \n 结束，正好落在块首行行首）
+                write!(out, "\x1b[{rows}A").ok();
+            }
+            out.write_all(body.as_bytes()).ok();
+            out.flush().ok();
+            std::thread::sleep(animation.delay);
+            if raw
+                .as_ref()
+                .and_then(|r| r.read_key())
+                .is_some_and(|k| matches!(k, b'q' | 0x03 | 0x1b))
+            {
+                break 'rounds;
             }
         }
     }

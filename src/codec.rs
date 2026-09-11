@@ -183,6 +183,15 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// 编码帧头部推出该帧的编码字节长度（动图多帧串联时切帧用）
+pub fn encoded_size(data: &[u8]) -> usize {
+    let rows = data[0] as usize;
+    let cols = data[1] as usize;
+    let wide = data[2] != 0;
+    let n_pal = u16::from_le_bytes(data[3..5].try_into().unwrap()) as usize;
+    5 + n_pal * 3 + rows * cols * if wide { 5 } else { 3 }
+}
+
 /// 从编码字节直接渲染 ANSI 到 out（运行时路径，零中间结构）
 pub fn decode_and_render(data: &[u8], out: &mut String) {
     let mut r = Reader { data, pos: 0 };

@@ -143,6 +143,22 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) logo_cache: bool,
 
+    /// 动画播放（需独立数据文件 anim.bin；仅 stdout 直连终端时生效，
+    /// 数据缺失或非 tty 回退静态图；与 --raw/-o/--logo-cache 互斥）
+    #[arg(
+        long,
+        conflicts_with_all = ["raw", "output", "logo_cache"]
+    )]
+    pub(crate) animated: bool,
+
+    /// 动画固定播放轮数后退出（省缺=无限循环，按 q 退出）
+    #[arg(long, value_name = "轮数", requires = "animated")]
+    pub(crate) loops: Option<usize>,
+
+    /// 维护命令：把帧目录打包为 anim.bin（-o 指定输出路径）
+    #[arg(long, value_name = "帧目录", hide = true)]
+    pub(crate) anim_pack: Option<std::path::PathBuf>,
+
     /// 列出全部名字
     #[arg(short, long)]
     pub(crate) list: bool,

@@ -17,6 +17,8 @@ pokefetch -n charizard -f mega-x   # 指定 + 形态
 pokefetch -r 1-3       # 1~3 代随机
 pokefetch --random-by-names pikachu,gengar  # 名单内随机
 pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
+pokefetch --animated    # 动画播放（需动画数据，见下节）
+pokefetch --animated --loops 3  # 播 3 轮后退出（省缺无限循环，按 q 退出）
 ```
 
 面板信息读自 /proc、/sys 与环境变量，零外部依赖，取不到的行自动跳过。
@@ -41,6 +43,26 @@ preset 内的 logo 路径即指向它；`-o/--output <文件>` 可写入任意�
 fastfetch 面板列位由此稳定；`--center` 可让精灵在画布内居中（默认左锚）。
 随机时自动跳过当前终端放不下的精灵；
 显式 `-n`/`-b` 完全按指定输出、不做干预。
+
+## 动画播放
+
+`--animated` 播放精灵的逐帧动画（Showdown 对战动画转译，帧率取素材原生 30–40ms）。
+面板与名字行保持静态，只有精灵区域逐帧重绘；随机池、画布、`--center` 等行为与静态一致。
+
+动画数据不进二进制，运行时按以下顺序查找 `anim.bin`，找不到、损坏或该精灵
+没有动画帧时自动回退静态图：
+
+1. 环境变量 `POKEFETCH_ANIM` 指定的路径
+2. `$XDG_DATA_HOME/pokefetch/anim.bin`（默认 `~/.local/share/pokefetch/anim.bin`）
+
+数据文件由维护命令从帧目录打包生成：
+
+```
+pokefetch --anim-pack <帧目录> -o anim.bin
+```
+
+仅 stdout 直连终端时播放；`--raw`/`-o`/`--logo-cache`（fastfetch 对接路径）
+与 `--animated` 互斥，恒为静态单帧输出。
 
 ## 构建
 
