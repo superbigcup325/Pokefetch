@@ -21,6 +21,9 @@ pokefetch --animated    # 动画播放（需动画数据，见下节）
 pokefetch --animated --loops 3  # 播 3 轮后退出（省缺无限循环，按 q 退出）
 ```
 
+1/128 的 shiny 概率只在随机模式（默认 / `-r` / `--random-by-names`）生效；
+`-n` 指定名字时不掷点、恒为普通色，需要闪光显式加 `-s`。
+
 面板信息读自 /proc、/sys 与环境变量，零外部依赖，取不到的行自动跳过。
 默认为精选模块集，`--modules os,gpu,memory,…` 可任意挑选
 （可用：os host board bios kernel uptime packages shell de wm wmtheme theme icons

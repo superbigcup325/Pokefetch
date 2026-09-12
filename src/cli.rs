@@ -99,7 +99,7 @@ pub(crate) struct Args {
     #[arg(short = 'f', long, requires = "name")]
     pub(crate) form: Option<String>,
 
-    /// 强制闪光版（不带时随机有 1/128 概率出 shiny）
+    /// 强制闪光版（不带时随机模式有 1/128 概率出 shiny；-n 指定不掷点）
     #[arg(short, long)]
     pub(crate) shiny: bool,
 
