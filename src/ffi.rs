@@ -64,6 +64,7 @@ pub struct Termios {
 pub const TCSANOW: i32 = 0;
 pub const ICANON: u32 = 0x2;
 pub const ECHO: u32 = 0x8;
+pub const ISIG: u32 = 0x1;
 pub const VMIN: usize = 6;
 pub const VTIME: usize = 5;
 
@@ -98,7 +99,9 @@ impl RawMode {
                 c_ispeed: t.c_ispeed,
                 c_ospeed: t.c_ospeed,
             };
-            t.c_lflag &= !(ICANON | ECHO);
+            // ISIG 一并关掉：Ctrl-C 变成可读的 0x03 字节走优雅退出路径，
+            // 否则 SIGINT 直接杀进程，termios 无法恢复，终端残留 raw 模式
+            t.c_lflag &= !(ICANON | ECHO | ISIG);
             t.c_cc[VMIN] = 0;
             t.c_cc[VTIME] = 0;
             if tcsetattr(0, TCSANOW, &t) != 0 {
