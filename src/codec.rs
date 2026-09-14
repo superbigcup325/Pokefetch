@@ -192,20 +192,26 @@ pub fn encoded_size(data: &[u8]) -> usize {
     5 + n_pal * 3 + rows * cols * if wide { 5 } else { 3 }
 }
 
-/// 从编码字节直接渲染 ANSI 到 out（运行时路径，零中间结构）
-pub fn decode_and_render(data: &[u8], out: &mut String) {
-    let mut r = Reader { data, pos: 0 };
-    let rows = r.u8() as usize;
-    let cols = r.u8() as usize;
-    let wide = r.u8() != 0;
-    let n_pal = r.u16le() as usize;
-    let pal: Vec<Color> = r
-        .take(n_pal * 3)
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|c| (c[0], c[1], c[2]))
-        .collect();
+/// 裸格子块字节数（rows×cols 格，宽度随索引位宽）
+pub fn cells_len(rows: usize, cols: usize, wide: bool) -> usize {
+    rows * cols * if wide { 5 } else { 3 }
+}
+
+/// 从裸格子字节渲染 ANSI 到 out（调色板由调用方给定；常规编码与动画 v2 帧共用）。
+/// 格子 = wide ? (fg u16le, bg u16le, glyph u8) : (fg u8, bg u8, glyph u8)，
+/// 索引由编码端保证落在 pal 内（封闭集信任边界，与 decode_and_render 一致）
+pub fn render_cells(
+    pal: &[Color],
+    rows: usize,
+    cols: usize,
+    wide: bool,
+    cells: &[u8],
+    out: &mut String,
+) {
+    let mut cells = Reader {
+        data: cells,
+        pos: 0,
+    };
 
     let mut curf = 0usize;
     let mut curb = 0usize;
@@ -216,10 +222,6 @@ pub fn decode_and_render(data: &[u8], out: &mut String) {
     let set_bg = |out: &mut String, i: usize| {
         let (r, g, b) = pal[i - 1];
         out.push_str(&format!("\x1b[48;2;{r};{g};{b}m"));
-    };
-    let mut cells = Reader {
-        data,
-        pos: 5 + n_pal * 3,
     };
     for _row in 0..rows {
         for _col in 0..cols {
@@ -268,6 +270,23 @@ pub fn decode_and_render(data: &[u8], out: &mut String) {
         }
         out.push('\n'); // 素材文件均以 \n 结尾，与原直出行为对齐
     }
+}
+
+/// 从编码字节直接渲染 ANSI 到 out（运行时路径，零中间结构）
+pub fn decode_and_render(data: &[u8], out: &mut String) {
+    let mut r = Reader { data, pos: 0 };
+    let rows = r.u8() as usize;
+    let cols = r.u8() as usize;
+    let wide = r.u8() != 0;
+    let n_pal = r.u16le() as usize;
+    let pal: Vec<Color> = r
+        .take(n_pal * 3)
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| (c[0], c[1], c[2]))
+        .collect();
+    render_cells(&pal, rows, cols, wide, &data[5 + n_pal * 3..], out);
 }
 
 #[cfg(test)]
