@@ -36,6 +36,16 @@ pub struct Statvfs {
     __reserved: [u32; 3],
 }
 
+/// struct sigaction（glibc/x86_64 布局：handler + mask + flags + restorer，
+/// 注意与内核 rt_sigaction 的字段顺序不同）。restorer 由 glibc 包装函数自动补
+#[repr(C)]
+pub struct SigAction {
+    pub handler: usize,
+    pub mask: [u64; 16],
+    pub flags: i32,
+    pub restorer: usize,
+}
+
 unsafe extern "C" {
     pub fn open(path: *const c_char, flags: i32) -> i32;
     pub fn close(fd: i32) -> i32;
@@ -46,6 +56,7 @@ unsafe extern "C" {
     pub fn isatty(fd: i32) -> i32;
     pub fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
     pub fn tcsetattr(fd: i32, actions: i32, termios: *const Termios) -> i32;
+    pub fn sigaction(signum: i32, act: *const SigAction, old: *mut SigAction) -> i32;
 }
 
 /// struct termios（x86_64 Linux）
@@ -76,14 +87,24 @@ pub fn stdin_is_tty() -> bool {
     unsafe { isatty(0) == 1 }
 }
 
-/// stdin 原始模式守卫：关掉规范模式与回显（c_lflag），读改为非阻塞（VMIN=0/VTIME=0），
-/// Drop 时恢复原 termios。动画播放的按键退出依赖这里
+/// stdin 原始模式守卫：关掉规范模式与回显（c_lflag），Drop 时恢复原 termios。
+/// 两种读法：enable() 非阻塞轮询（VMIN=0，动画播放）；enable_blocking()
+/// 阻塞读（VMIN=1，--watch 专用，0 返回即真 EOF、信号打断返回 EINTR）。
+/// Drop 顺序契约见 play.rs / watch.rs 模块头
 pub struct RawMode {
     saved: Termios,
 }
 
 impl RawMode {
     pub fn enable() -> Option<RawMode> {
+        Self::setup(0)
+    }
+
+    pub fn enable_blocking() -> Option<RawMode> {
+        Self::setup(1)
+    }
+
+    fn setup(vmin: u8) -> Option<RawMode> {
         unsafe {
             let mut t = std::mem::zeroed::<Termios>();
             if tcgetattr(0, &mut t) != 0 {
@@ -102,7 +123,7 @@ impl RawMode {
             // ISIG 一并关掉：Ctrl-C 变成可读的 0x03 字节走优雅退出路径，
             // 否则 SIGINT 直接杀进程，termios 无法恢复，终端残留 raw 模式
             t.c_lflag &= !(ICANON | ECHO | ISIG);
-            t.c_cc[VMIN] = 0;
+            t.c_cc[VMIN] = vmin;
             t.c_cc[VTIME] = 0;
             if tcsetattr(0, TCSANOW, &t) != 0 {
                 return None;
@@ -111,11 +132,25 @@ impl RawMode {
         }
     }
 
-    /// 非阻塞读一个键；无输入返回 None
+    /// 非阻塞读一个键（配合 enable()）；无输入返回 None
     pub fn read_key(&self) -> Option<u8> {
         let mut b = 0u8;
         let n = unsafe { read(0, &mut b as *mut u8 as *mut c_void, 1) };
         if n == 1 { Some(b) } else { None }
+    }
+
+    /// 阻塞读一字节（配合 enable_blocking()）：Some(Some(b))=按键；
+    /// Some(None)=EOF（stdin 对端关闭）；None=被信号打断（EINTR），
+    /// 调用方应先查 WINCH 标志再重读。VMIN=1 下 0 返回不可能是"无数据"，
+    /// 只能是对端关闭，与非阻塞轮询的语义严格区分
+    pub fn read_blocking(&self) -> Option<Option<u8>> {
+        let mut b = 0u8;
+        let n = unsafe { read(0, &mut b as *mut u8 as *mut c_void, 1) };
+        match n {
+            1 => Some(Some(b)),
+            0 => Some(None),
+            _ => None,
+        }
     }
 }
 
@@ -128,6 +163,25 @@ impl Drop for RawMode {
 pub const TIOCGWINSZ: u64 = 0x5413;
 pub const SIOCGIFCONF: u64 = 0x8912;
 pub const SIOCGIFNETMASK: u64 = 0x891b;
+
+/// 终端尺寸变化信号（x86_64 Linux）
+pub const SIGWINCH: i32 = 28;
+
+/// 注册 SIGWINCH 处理器。必须走 sigaction 而非 signal()：后者固定带
+/// SA_RESTART，阻塞读不会被信号打断；这里 flags=0，resize 时阻塞中的
+/// read 以 EINTR 醒来，调用方查标志重绘。处理器内只允许原子置位
+/// （async-signal-safe），重绘动作由主循环执行
+pub fn set_winch_handler(handler: extern "C" fn(i32)) {
+    let act = SigAction {
+        handler: handler as usize,
+        mask: [0; 16],
+        flags: 0,
+        restorer: 0,
+    };
+    unsafe {
+        sigaction(SIGWINCH, &act, std::ptr::null_mut());
+    }
+}
 
 /// 终端尺寸（行, 列）。优先查控制终端 /dev/tty——stdout 被管道接管
 /// （fastfetch 注入场景）时它才是最终显示窗口；再退标准流；都不是 tty 返回 None

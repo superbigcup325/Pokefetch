@@ -11,6 +11,7 @@ mod ffi;
 mod panel;
 mod play;
 mod sysinfo;
+mod watch;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 
@@ -200,7 +201,7 @@ fn main() {
         random,
         random_by_names,
         form,
-        mut shiny,
+        shiny,
         big,
         canvas,
         center,
@@ -213,6 +214,7 @@ fn main() {
         logo_cache,
         animated,
         loops,
+        watch,
         anim_pack: _,
         list: _,
     } = args;
@@ -276,56 +278,95 @@ fn main() {
     };
 
     let mut rng = Rng::new();
-    let chosen: String = match name {
-        // 显式 -n 且未要求随机：直接用（-f 拼形态）
-        Some(n) if !random_given => match &form {
+
+    // 显式 -n 且未要求随机：固定用（-f 拼形态）；其余走随机路径
+    let explicit: Option<String> = match name {
+        Some(n) if !random_given => Some(match &form {
             Some(f) => resolve_form(&n, f),
             None => n,
-        },
-        // 随机路径（无 -n，或 -r 覆盖显式名字）
-        _ => {
-            // shiny 先定（分布与顺序无关），池子按该变体的宽度过滤才有意义
-            if !shiny {
-                shiny = rng.next_u64().is_multiple_of(SHINY_RATE);
-            }
-            let size = if big { "large" } else { "small" };
-            let variant = if shiny { "shiny" } else { "regular" };
-            let all = names();
-            let mut pool: Vec<&str> = if let Some(list) = &by_names {
-                // 校验走索引键（与 -n 同口径，形态全名可用），不只限 names.txt 基础名
-                let picked: Vec<&str> = list.iter().map(String::as_str).collect();
-                for n in &picked {
-                    if sprite_cols(&index, size, variant, n).is_none() {
-                        die(&format!("没有这只宝可梦: {n}"));
-                    }
-                }
-                picked
-            } else {
-                let (lo, hi) = match &gens {
-                    Some(spec) => {
-                        let ranges = cli::parse_gens(spec);
-                        ranges[rng.below(ranges.len())]
-                    }
-                    None => (1, all.len()),
-                };
-                all[lo - 1..hi].to_vec()
-            };
-            // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
-            if let Some((_, cols)) = term {
-                let fits: Vec<&str> = pool
-                    .iter()
-                    .copied()
-                    .filter(|n| sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols))
-                    .collect();
-                if !fits.is_empty() {
-                    pool = fits;
-                }
-            }
-            pool[rng.below(pool.len())].to_owned()
-        }
+        }),
+        _ => None,
     };
 
-    let ansi = sprite_ansi(&index, &chosen, shiny, big);
+    // 选帧闭包：shiny 掷点 + 池过滤 + 解码一次完成，一次性输出与 --watch
+    // 的 r 重 roll 共用；term_cols 按调用时点的终端宽度传入（重 roll 可能
+    // 发生在 resize 之后，过滤须以当前宽度为准）
+    let mut next = |term_cols: Option<usize>| -> watch::Frame {
+        let (name, shiny) = match &explicit {
+            Some(n) => (n.clone(), shiny),
+            None => {
+                // shiny 先定（分布与顺序无关），池子按该变体的宽度过滤才有意义
+                let shiny = shiny || rng.next_u64().is_multiple_of(SHINY_RATE);
+                let size = if big { "large" } else { "small" };
+                let variant = if shiny { "shiny" } else { "regular" };
+                let all = names();
+                let mut pool: Vec<&str> = if let Some(list) = &by_names {
+                    // 校验走索引键（与 -n 同口径，形态全名可用），不只限 names.txt 基础名
+                    let picked: Vec<&str> = list.iter().map(String::as_str).collect();
+                    for n in &picked {
+                        if sprite_cols(&index, size, variant, n).is_none() {
+                            die(&format!("没有这只宝可梦: {n}"));
+                        }
+                    }
+                    picked
+                } else {
+                    let (lo, hi) = match &gens {
+                        Some(spec) => {
+                            let ranges = cli::parse_gens(spec);
+                            ranges[rng.below(ranges.len())]
+                        }
+                        None => (1, all.len()),
+                    };
+                    all[lo - 1..hi].to_vec()
+                };
+                // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
+                if let Some(cols) = term_cols {
+                    let fits: Vec<&str> = pool
+                        .iter()
+                        .copied()
+                        .filter(|n| {
+                            sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols)
+                        })
+                        .collect();
+                    if !fits.is_empty() {
+                        pool = fits;
+                    }
+                }
+                (pool[rng.below(pool.len())].to_owned(), shiny)
+            }
+        };
+        let ansi = sprite_ansi(&index, &name, shiny, big);
+        watch::Frame { name, shiny, ansi }
+    };
+
+    // --watch 常驻重绘：SIGWINCH 热加载，占用备用屏直至用户退出（见 watch.rs）
+    if watch {
+        if !ffi::stdout_is_tty() || !ffi::stdin_is_tty() {
+            die("--watch 需要交互终端（stdin/stdout 直连）");
+        }
+        let module_names = if no_panel {
+            Vec::new()
+        } else {
+            sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e))
+        };
+        let ctx = watch::Ctx {
+            big,
+            canvas,
+            center,
+            no_panel,
+            show_title: title.unwrap_or(no_panel),
+            budget_enabled: modules.is_none(),
+            module_names,
+        };
+        watch::run(&ctx, &mut next);
+        return;
+    }
+
+    let watch::Frame {
+        name: chosen,
+        shiny,
+        ansi,
+    } = next(term.map(|(_, cols)| cols));
 
     // 动画路径：--animated 且 stdout 直连终端且数据命中；任一不满足回退静态图。
     // fastfetch 对接路径（--raw/-o/--logo-cache）被 clap 互斥挡住，恒为静态

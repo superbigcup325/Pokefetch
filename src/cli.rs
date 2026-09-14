@@ -155,6 +155,14 @@ pub(crate) struct Args {
     #[arg(long, value_name = "轮数", requires = "animated")]
     pub(crate) loops: Option<usize>,
 
+    /// 常驻重绘：终端尺寸变化（含 niri 等合成器全屏/平铺切换）即整帧重排；
+    /// q/Esc/Ctrl-C 退出，r 重掷一只。需交互终端（与 --raw/-o/--logo-cache/--animated 互斥）
+    #[arg(
+        long,
+        conflicts_with_all = ["raw", "output", "logo_cache", "animated"]
+    )]
+    pub(crate) watch: bool,
+
     /// 维护命令：把帧目录打包为 anim.bin（-o 指定输出路径）
     #[arg(long, value_name = "帧目录", hide = true)]
     pub(crate) anim_pack: Option<std::path::PathBuf>,
