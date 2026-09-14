@@ -416,7 +416,13 @@ fn main() {
         let mut rows = panel_rows(&info, budget);
         // 图鉴编号行：names.txt 行号即编号，紧跟分隔线
         if let Some(num) = dex_number(&chosen) {
-            rows.insert(2, format!("\x1b[1;34mDex:\x1b[0m #{num:03}"));
+            rows.insert(
+                2,
+                format!(
+                    "\x1b[1;34mDex:\x1b[0m #{num:03}{}",
+                    if shiny { " ✨" } else { "" }
+                ),
+            );
         }
         Some(rows)
     } else {
