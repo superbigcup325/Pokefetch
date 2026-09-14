@@ -217,6 +217,10 @@ impl AnimData {
             return None;
         }
         let n = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+        // 每条目至少 1+14B：先按数据量卡条目上限，防坏 n 把 with_capacity 撑爆
+        if n > (data.len() - 4) / 15 {
+            return None;
+        }
         let mut index = Vec::with_capacity(n);
         let mut pos = 4usize;
         for _ in 0..n {
@@ -238,7 +242,11 @@ impl AnimData {
             pos = p + 14;
         }
         let frames_start = pos;
-        for (_, _, _, _, _, coff, _) in &mut index {
+        // 帧区偏移越界的索引整文件拒绝，lookup 侧切片即恒在界内
+        for (_, _, _, _, _, coff, clen) in &mut index {
+            if frames_start + *coff + *clen > data.len() {
+                return None;
+            }
             *coff += frames_start;
         }
         Some(AnimData {
@@ -254,6 +262,10 @@ impl AnimData {
             .binary_search_by(|(k, ..)| k.as_str().cmp(key))
             .ok()?;
         let (_, _, _, delay_cs, n_frames, coff, clen) = self.index[i];
+        // pack 不会产出 0 帧条目，坏文件按缺失处理
+        if n_frames == 0 {
+            return None;
+        }
         let mut dec =
             ruzstd::decoding::StreamingDecoder::new(&self.data[coff..coff + clen]).ok()?;
         let mut packed = Vec::new();
@@ -262,6 +274,10 @@ impl AnimData {
         let mut pos = 0usize;
         for _ in 0..n_frames {
             let rest = packed.get(pos..)?;
+            // 帧头至少 5B（rows|cols|wide|n_pal），坏尾巴拒绝而非越界 panic
+            if rest.len() < 5 {
+                return None;
+            }
             let size = codec::encoded_size(rest);
             let mut ansi = String::new();
             codec::decode_and_render(rest.get(..size)?, &mut ansi);
@@ -279,41 +295,88 @@ impl AnimData {
 mod tests {
     use super::*;
 
-    /// 按运行时格式手工构造单条目 blob（key/rows/cols/delay/帧编码串联）
-    fn build_blob(key: &str, rows: u8, cols: u8, delay_cs: u16, frames: &[u8]) -> Vec<u8> {
-        let comp =
-            ruzstd::encoding::compress_to_vec(frames, ruzstd::encoding::CompressionLevel::Fastest);
+    /// 测试条目：(key, rows, cols, delay_cs, n_frames, 帧编码串联)
+    type TestItem<'a> = (&'a str, u8, u8, u16, usize, Vec<u8>);
+
+    /// 按运行时格式构造多条目 blob（key 须有序；coff 以帧区起点为 0，同 pack 语义）。
+    /// 帧数显式给定，便于伪造坏索引。
+    fn build_multi_blob(items: &[TestItem<'_>]) -> Vec<u8> {
+        let comp: Vec<Vec<u8>> = items
+            .iter()
+            .map(|(.., frames)| {
+                ruzstd::encoding::compress_to_vec(
+                    frames.as_slice(),
+                    ruzstd::encoding::CompressionLevel::Fastest,
+                )
+            })
+            .collect();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        let mut index_size = 4usize;
+        for (k, ..) in items {
+            index_size += 1 + k.len() + 14;
+        }
+        blob.resize(index_size, 0);
+        let mut slot = 4usize;
+        for ((k, r, c, d, n, _), comp) in items.iter().zip(comp) {
+            let coff = (blob.len() - index_size) as u32;
+            let clen = comp.len() as u32;
+            blob.extend_from_slice(&comp);
+            blob[slot] = k.len() as u8;
+            blob[slot + 1..slot + 1 + k.len()].copy_from_slice(k.as_bytes());
+            let p = slot + 1 + k.len();
+            blob[p] = *r;
+            blob[p + 1] = *c;
+            blob[p + 2..p + 4].copy_from_slice(&d.to_le_bytes());
+            blob[p + 4..p + 6].copy_from_slice(&(*n as u16).to_le_bytes());
+            blob[p + 6..p + 10].copy_from_slice(&coff.to_le_bytes());
+            blob[p + 10..p + 14].copy_from_slice(&clen.to_le_bytes());
+            slot = p + 14;
+        }
+        blob
+    }
+
+    /// 单条目 blob，帧区直接给定（可注入任意字节流，不必是合法帧编码）
+    fn blob_with_region(region: &[u8], n_frames: u16) -> Vec<u8> {
+        let key = "regular/a";
         let mut blob = Vec::new();
         blob.extend_from_slice(&1u32.to_le_bytes());
         let index_size = 4 + 1 + key.len() + 14;
         blob.resize(index_size, 0);
-        blob.extend_from_slice(&comp);
+        blob.extend_from_slice(region);
         blob[4] = key.len() as u8;
         blob[5..5 + key.len()].copy_from_slice(key.as_bytes());
         let p = 5 + key.len();
-        blob[p] = rows;
-        blob[p + 1] = cols;
-        blob[p + 2..p + 4].copy_from_slice(&delay_cs.to_le_bytes());
-        // 帧数由 encoded_size 切分反推：测试里直接写死
+        blob[p] = 1;
+        blob[p + 1] = 1;
+        blob[p + 2..p + 4].copy_from_slice(&3u16.to_le_bytes());
+        blob[p + 4..p + 6].copy_from_slice(&n_frames.to_le_bytes());
+        blob[p + 6..p + 10].copy_from_slice(&0u32.to_le_bytes());
+        blob[p + 10..p + 14].copy_from_slice(&(region.len() as u32).to_le_bytes());
+        blob
+    }
+
+    /// 串联帧编码里的实际帧数（encoded_size 切分）
+    fn count_frames(frames: &[u8]) -> usize {
         let mut n = 0usize;
         let mut pos = 0usize;
         while pos < frames.len() {
             pos += codec::encoded_size(&frames[pos..]);
             n += 1;
         }
-        blob[p + 4..p + 6].copy_from_slice(&(n as u16).to_le_bytes());
-        blob[p + 6..p + 10].copy_from_slice(&0u32.to_le_bytes());
-        blob[p + 10..p + 14].copy_from_slice(&(comp.len() as u32).to_le_bytes());
-        blob
+        n
+    }
+
+    fn one_frame(text: &str) -> Vec<u8> {
+        codec::encode(&codec::parse_ansi(text))
     }
 
     #[test]
     fn parse_and_lookup_roundtrip() {
-        let f1 = codec::encode(&codec::parse_ansi("█\n"));
-        let f2 = codec::encode(&codec::parse_ansi("\x1b[38;2;255;0;0m█\x1b[0m\n"));
-        let mut frames = f1;
-        frames.extend_from_slice(&f2);
-        let blob = build_blob("regular/pikachu", 1, 1, 4, &frames);
+        let mut frames = one_frame("█\n");
+        frames.extend_from_slice(&one_frame("\x1b[38;2;255;0;0m█\x1b[0m\n"));
+        let n = count_frames(&frames);
+        let blob = build_multi_blob(&[("regular/pikachu", 1, 1, 4, n, frames)]);
         let data = AnimData::parse(&blob).unwrap();
         let anim = data.lookup("regular/pikachu").unwrap();
         assert_eq!(anim.frames.len(), 2);
@@ -324,8 +387,104 @@ mod tests {
     }
 
     #[test]
+    fn multi_entry_lookup_and_delay() {
+        let f = one_frame("█\n");
+        let mut two = f.clone();
+        two.extend_from_slice(&one_frame("\x1b[48;2;0;0;255m▀\x1b[0m\n"));
+        let blob = build_multi_blob(&[
+            ("regular/aaa", 1, 1, 0, count_frames(&f), f),
+            ("shiny/bbb", 1, 1, 65535, count_frames(&two), two),
+        ]);
+        let data = AnimData::parse(&blob).unwrap();
+        let a = data.lookup("regular/aaa").unwrap();
+        assert_eq!(a.frames.len(), 1);
+        assert_eq!(a.delay, Duration::ZERO);
+        let b = data.lookup("shiny/bbb").unwrap();
+        assert_eq!(b.frames.len(), 2);
+        assert_eq!(b.delay, Duration::from_millis(655_350));
+        // 二分命中要求 key 有序：互换变体名不得误命中
+        assert!(data.lookup("regular/bbb").is_none());
+        assert!(data.lookup("shiny/aaa").is_none());
+    }
+
+    #[test]
+    fn wide_frame_roundtrip() {
+        // >255 色触发 u16 索引路径，经 blob 往返渲染语义不丢
+        let mut text = String::new();
+        for i in 0..304u16 {
+            if i > 0 && i % 16 == 0 {
+                text.push('\n');
+            }
+            text.push_str(&format!("\x1b[38;2;{};{};0m█\x1b[0m", i & 0xff, i >> 8));
+        }
+        let f = codec::encode(&codec::parse_ansi(&text));
+        let blob = build_multi_blob(&[("regular/wide", 19, 16, 4, 1, f)]);
+        let data = AnimData::parse(&blob).unwrap();
+        let anim = data.lookup("regular/wide").unwrap();
+        let s1 = codec::parse_ansi(&text);
+        let s2 = codec::parse_ansi(&anim.frames[0]);
+        assert!(codec::semantic_eq(&s1, &s2));
+    }
+
+    #[test]
+    fn parse_accepts_empty_index() {
+        let data = AnimData::parse(&0u32.to_le_bytes()).unwrap();
+        assert!(data.lookup("regular/pikachu").is_none());
+    }
+
+    #[test]
     fn parse_rejects_garbage() {
         assert!(AnimData::parse(b"").is_none());
         assert!(AnimData::parse(&[9, 0, 0, 0, 255]).is_none()); // n 超出数据
+        // n=0xFFFFFFFF 配几字节残料：拒绝而非按 n 预留容量
+        assert!(AnimData::parse(&[0xff, 0xff, 0xff, 0xff, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_truncated_file() {
+        let blob = build_multi_blob(&[("regular/aaaaaaaa", 1, 1, 3, 1, one_frame("█\n"))]);
+        assert!(AnimData::parse(&blob[..blob.len() / 2]).is_none()); // 索引区腰斩
+        assert!(AnimData::parse(&blob[..blob.len() - 1]).is_none()); // 帧区截断同拒
+    }
+
+    #[test]
+    fn parse_rejects_frame_range_out_of_bounds() {
+        let p = 4 + 1 + "regular/a".len(); // 首条目 rows 字节位置
+        let mut blob = build_multi_blob(&[("regular/a", 1, 1, 3, 1, one_frame("█\n"))]);
+        blob[p + 10..p + 14].copy_from_slice(&u32::MAX.to_le_bytes()); // clen 越界
+        assert!(AnimData::parse(&blob).is_none());
+        let mut blob = build_multi_blob(&[("regular/a", 1, 1, 3, 1, one_frame("█\n"))]);
+        blob[p + 6..p + 10].copy_from_slice(&u32::MAX.to_le_bytes()); // coff 越界
+        assert!(AnimData::parse(&blob).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_bad_utf8_key() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&[1, 0xff]); // klen=1 + 非 UTF-8 key
+        blob.extend_from_slice(&[0; 14]);
+        assert!(AnimData::parse(&blob).is_none());
+    }
+
+    #[test]
+    fn lookup_rejects_degenerate_frames() {
+        // n_frames=0：pack 不可产出，坏文件按缺失处理
+        let blob = build_multi_blob(&[("regular/a", 1, 1, 3, 0, one_frame("█\n"))]);
+        let data = AnimData::parse(&blob).unwrap();
+        assert!(data.lookup("regular/a").is_none());
+
+        // n_frames 虚高：帧流提前耗尽（残尾不足 5B 帧头）→ None 而非 panic
+        let blob = build_multi_blob(&[("regular/a", 1, 1, 3, 3, one_frame("█\n"))]);
+        let data = AnimData::parse(&blob).unwrap();
+        assert!(data.lookup("regular/a").is_none());
+
+        // 帧流解压后不足一个帧头
+        let junk = ruzstd::encoding::compress_to_vec(
+            &[1u8, 2, 3, 4][..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let data = AnimData::parse(&blob_with_region(&junk, 1)).unwrap();
+        assert!(data.lookup("regular/a").is_none());
     }
 }
