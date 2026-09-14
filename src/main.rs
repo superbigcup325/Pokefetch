@@ -2,13 +2,14 @@
 // 素材编译期内嵌：build.rs 编码 + 压缩生成 OUT_DIR/sprites.bin（key 排序，运行时二分）
 // 编解码核心见 codec.rs（build.rs 与运行时共用）；
 // CLI 表面在 cli.rs，画布几何在 canvas.rs，面板渲染在 panel.rs，
-// 系统信息数据层在 sysinfo/（注册表 + 数据域子模块）
+// 动画获取与播放循环在 play.rs，系统信息数据层在 sysinfo/（注册表 + 数据域子模块）
 mod anim;
 mod canvas;
 mod cli;
 mod codec;
 mod ffi;
 mod panel;
+mod play;
 mod sysinfo;
 
 static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
@@ -16,7 +17,7 @@ static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 // -f/--form 的形态表：build.rs 从 assets/pokemon.json 生成
 include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
-use std::io::{Read, Write};
+use std::io::Read;
 
 use canvas::{compose, max_visible_width, pad_canvas};
 use cli::Args;
@@ -333,25 +334,7 @@ fn main() {
 
     // 动画路径：--animated 且 stdout 直连终端且数据命中；任一不满足回退静态图。
     // fastfetch 对接路径（--raw/-o/--logo-cache）被 clap 互斥挡住，恒为静态
-    let animation = if animated {
-        if !ffi::stdout_is_tty() {
-            eprintln!("pokefetch: stdout 不是终端，动画回退静态图");
-            None
-        } else if let Some(data) = anim::AnimData::load() {
-            let variant = if shiny { "shiny" } else { "regular" };
-            match data.lookup(&format!("{variant}/{chosen}")) {
-                Some(a) => Some(a),
-                None => {
-                    eprintln!("pokefetch: 动画数据里没有 {chosen}，回退静态图");
-                    None
-                }
-            }
-        } else {
-            None // 未找到/无法解析的消息由 AnimData::load 负责
-        }
-    } else {
-        None
-    };
+    let animation = play::prepare(animated, shiny, &chosen);
 
     // 画布：显式 --canvas 原样生效（两尺寸都垫、不随终端收窄）；
     // 默认 small=40 并随终端收窄，large 不垫
@@ -431,7 +414,7 @@ fn main() {
     }
     match dest {
         Dest::Stdout => match &animation {
-            Some(a) => play(a, &rendered, panel_rows_v.as_deref(), sprite_w, loops),
+            Some(a) => play::run(a, &rendered, panel_rows_v.as_deref(), sprite_w, loops),
             None => {
                 let body = match panel_rows_v {
                     Some(rows) => compose(&rendered[0], rows, sprite_w, 3),
@@ -448,52 +431,6 @@ fn main() {
             std::fs::write(&path, &ansi).unwrap_or_else(|e| die(&format!("写 {path:?} 失败: {e}")));
             if echo {
                 print!("{ansi}");
-            }
-        }
-    }
-}
-
-/// 动画播放：面板/名字行在块外保持静态，帧循环只覆写精灵+面板整行区
-/// （光标上移到块首重打，行已按画布垫齐，无闪烁）。默认无限循环；
-/// stdin 为 tty 且未指定 --loops 时进原始模式监听 q/Esc/Ctrl-C 退出
-fn play(
-    animation: &anim::Animation,
-    frames: &[String],
-    panel: Option<&[String]>,
-    sprite_w: usize,
-    loops: Option<usize>,
-) {
-    let bodies: Vec<String> = frames
-        .iter()
-        .map(|f| match panel {
-            Some(p) => compose(f, p.to_vec(), sprite_w, 3),
-            None => f.clone(),
-        })
-        .collect();
-    let rows = bodies[0].lines().count();
-    let mut out = std::io::stdout().lock();
-    let raw = if loops.is_none() && ffi::stdin_is_tty() {
-        ffi::RawMode::enable()
-    } else {
-        None
-    };
-    'rounds: for round in 0..loops.unwrap_or(usize::MAX) {
-        for (i, body) in bodies.iter().enumerate() {
-            if round > 0 || i > 0 {
-                // 光标回到本块首行（块尾以 \n 结束，正好落在块首行行首）
-                write!(out, "\x1b[{rows}A").ok();
-            }
-            // stdout 不可写（终端关闭/EPIPE）即收场，继续循环只是空转
-            if out.write_all(body.as_bytes()).is_err() || out.flush().is_err() {
-                break 'rounds;
-            }
-            std::thread::sleep(animation.delay);
-            if raw
-                .as_ref()
-                .and_then(|r| r.read_key())
-                .is_some_and(|k| matches!(k, b'q' | 0x03 | 0x1b))
-            {
-                break 'rounds;
             }
         }
     }
