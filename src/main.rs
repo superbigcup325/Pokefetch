@@ -19,19 +19,14 @@ include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
 use std::io::Read;
 
-use canvas::{compose, max_visible_width, pad_canvas};
+use canvas::{compose, max_visible_width, pad_canvas, resolve_canvas};
 use cli::Args;
-use panel::panel_rows;
 use ruzstd::decoding::StreamingDecoder;
 
 const NAMES_TXT: &str = include_str!("../assets/names.txt");
 
 /// 随机出 shiny 的分母（1/N，与上游 pokemon-colorscripts 的 1/128 一致）
 const SHINY_RATE: u64 = 128;
-
-/// 默认画布宽（列）：small 输出左锚、右垫到该宽度，fastfetch 面板列位由此稳定；
-/// large 默认不垫（-b 是刻意行为）。--canvas 可覆盖，0 = 关闭
-const DEFAULT_CANVAS: usize = 40;
 
 struct Rng(u64);
 
@@ -145,7 +140,7 @@ fn resolve_form(name: &str, form: &str) -> String {
 
 /// 图鉴编号 = names.txt 行号（1-based）；形态名回退到基础名
 /// （charizard-mega-x → charizard；ho-oh / porygon-z 这类原生带连字符的不受影响）
-fn dex_number(name: &str) -> Option<usize> {
+pub(crate) fn dex_number(name: &str) -> Option<usize> {
     let all = names();
     let mut cur = name;
     loop {
@@ -338,20 +333,7 @@ fn main() {
 
     // 画布：显式 --canvas 原样生效（两尺寸都垫、不随终端收窄）；
     // 默认 small=40 并随终端收窄，large 不垫
-    let canvas_w = match canvas {
-        Some(0) => 0,
-        Some(n) => n,
-        None => {
-            if big {
-                0
-            } else {
-                match term {
-                    Some((_, cols)) => DEFAULT_CANVAS.min(cols),
-                    None => DEFAULT_CANVAS,
-                }
-            }
-        }
-    };
+    let canvas_w = resolve_canvas(canvas, big, term.map(|(_, cols)| cols));
     // 最大可见行宽全程只扫一次：垫宽用（居中偏移），精灵区宽由它派生——
     // 垫宽后 = max(原宽, 画布宽)（超宽行不裁、原样伸出）；
     // 动画按全帧联合最大宽算统一偏移，帧间不抖
@@ -387,24 +369,23 @@ fn main() {
     let panel_rows_v = if panel {
         let names = sysinfo::resolve(modules.as_deref()).unwrap_or_else(|e| die(&e));
         let info = sysinfo::collect(&names);
-        // 行宽预算：默认集在窄终端下截值防折行（显式 --modules 硬打不裁）；
-        // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）
-        let budget = match (modules.is_none(), term) {
-            (true, Some((_, cols))) => Some(cols.saturating_sub(sprite_w + 3)),
-            _ => None,
-        };
-        let mut rows = panel_rows(&info, budget);
-        // 图鉴编号行：names.txt 行号即编号，紧跟分隔线
-        if let Some(num) = dex_number(&chosen) {
-            rows.insert(
-                2,
-                format!(
-                    "\x1b[1;34mDex:\x1b[0m #{num:03}{}",
-                    if shiny { " ✨" } else { "" }
-                ),
-            );
+        // 行宽预算：默认集在窄终端下逐行截值防折行（显式 --modules 硬打不裁）；
+        // 面板起点 = 精灵区宽 + gap，无终端检测（非 tty）则不裁（确定性）。
+        // 预算 0 = 终端只够精灵区，面板整体让位（gap 残行也会溢出）
+        let budget = panel::row_budget(modules.is_none(), term.map(|(_, cols)| cols), sprite_w);
+        match budget {
+            Some(0) => None,
+            b => {
+                // 图鉴编号行：names.txt 行号即编号，与其他行同受预算约束
+                let dex = dex_number(&chosen).map(|num| {
+                    format!(
+                        "\x1b[1;34mDex:\x1b[0m #{num:03}{}",
+                        if shiny { " ✨" } else { "" }
+                    )
+                });
+                Some(panel::panel_rows(&info, b, dex))
+            }
         }
-        Some(rows)
     } else {
         None
     };
