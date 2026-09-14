@@ -347,10 +347,7 @@ fn main() {
                 }
             }
         } else {
-            eprintln!(
-                "pokefetch: 未找到动画数据（POKEFETCH_ANIM 或 ~/.local/share/pokefetch/anim.bin），回退静态图"
-            );
-            None
+            None // 未找到/无法解析的消息由 AnimData::load 负责
         }
     } else {
         None
@@ -486,8 +483,10 @@ fn play(
                 // 光标回到本块首行（块尾以 \n 结束，正好落在块首行行首）
                 write!(out, "\x1b[{rows}A").ok();
             }
-            out.write_all(body.as_bytes()).ok();
-            out.flush().ok();
+            // stdout 不可写（终端关闭/EPIPE）即收场，继续循环只是空转
+            if out.write_all(body.as_bytes()).is_err() || out.flush().is_err() {
+                break 'rounds;
+            }
             std::thread::sleep(animation.delay);
             if raw
                 .as_ref()
