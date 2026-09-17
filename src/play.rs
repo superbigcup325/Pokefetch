@@ -2,8 +2,9 @@
 // 自 main.rs 拆出，main 回到纯编排。
 //
 // 生命周期契约（本模块的正确性所在，27deb83 踩过 termios 恢复坑）：
-// - RawMode 守卫在 run() 函数内创建、随作用域 Drop 还原 termios——
-//   正常返回、break 'rounds、panic unwind 三条退出路径全覆盖；
+// - RawMode 守卫在 run() 函数内创建、随作用域 Drop 先 tcflush 清未读输入
+//   再还原 termios（退出时的按键残留不得漏给 shell）——正常返回、
+//   break 'rounds、panic unwind 三条退出路径全覆盖；
 //   守卫不得提升到调用方作用域或任何更长生命周期，也不可 mem::forget。
 // - stdout 锁同样函数内获取；Drop 顺序 LIFO：先还原 termios 再放锁。
 // - 键盘监听借用守卫（read_key(&self)），循环结束监听即失效。
@@ -38,7 +39,7 @@ pub(crate) fn prepare(animated: bool, shiny: bool, chosen: &str) -> Option<anim:
 
 /// 逐帧播放：面板/名字行在块外保持静态，帧循环只覆写精灵+面板整行区
 /// （光标上移到块首重打，行已按画布垫齐，无闪烁）。默认无限循环；
-/// stdin 为 tty 且未指定 --loops 时进原始模式监听 q/Esc/Ctrl-C 退出
+/// stdin 为 tty 且未指定 --loops 时进原始模式，任意键退出
 pub(crate) fn run(
     animation: &anim::Animation,
     frames: &[String],
@@ -71,11 +72,9 @@ pub(crate) fn run(
                 break 'rounds;
             }
             std::thread::sleep(animation.delay);
-            if raw
-                .as_ref()
-                .and_then(|r| r.read_key())
-                .is_some_and(|k| matches!(k, b'q' | 0x03 | 0x1b))
-            {
+            // 被动观赏场景：任何按键都视为离场，无白名单（对照 --watch 的
+            // q/Q/Esc/Ctrl-C + r/R，那边有重掷语义必须保留白名单）
+            if raw.as_ref().and_then(|r| r.read_key()).is_some() {
                 break 'rounds;
             }
         }

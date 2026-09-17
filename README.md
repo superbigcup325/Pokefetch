@@ -19,7 +19,7 @@ pokefetch --random-by-names pikachu,gengar  # 名单内随机
 pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
 pokefetch --watch      # 常驻重绘（见下文）
 pokefetch --animated    # 动画播放（需动画数据，见下节）
-pokefetch --animated --loops 3  # 播 3 轮后退出（省缺无限循环，按 q 退出）
+pokefetch --animated --loops 3  # 播 3 轮后退出（省缺无限循环，任意键退出）
 pokefetch -l           # 列出全部可用名字
 ```
 
@@ -55,7 +55,8 @@ fastfetch 面板列位由此稳定；`--center` 可让精灵在画布内居中�
 
 `--animated` 播放精灵的逐帧动画（Showdown 对战动画转译，帧率取素材原生 30–40ms）。
 面板与名字行内容保持不变（播放时随精灵区域整行覆写，不闪烁）；
-随机池、画布、`--center` 等行为与静态一致。
+随机池、画布、`--center` 等行为与静态一致。播放中按任意键退出，
+退出时的按键不会残留到 shell。
 
 动画数据不进二进制。设置了环境变量 `POKEFETCH_ANIM` 时只使用它指向的
 `anim.bin`；未设置才查找 `$XDG_DATA_HOME/pokefetch/anim.bin`
@@ -77,7 +78,7 @@ pokefetch --anim-pack <帧目录> -o anim.bin
 
 `--watch` 进入常驻模式：精灵 + 面板常驻当前窗口，终端尺寸变化（含平铺/
 全屏切换引起的 resize）即整帧重排，随机池过滤与面板布局都按新宽度重算；
-按 `r` 重掷一只（shiny 同分布），`q`/`Esc`/`Ctrl-C` 退出，退出时还原终端
+按 `r`/`R` 重掷一只（shiny 同分布），`q`/`Q`/`Esc`/`Ctrl-C` 退出，退出时还原终端
 主屏。需 stdin/stdout 直连终端，与 `--raw`/`-o`/`--logo-cache`/`--animated`
 互斥。
 

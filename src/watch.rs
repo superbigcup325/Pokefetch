@@ -6,9 +6,10 @@
 // SA_RESTART），主循环随即按新 ioctl 尺寸整帧重排——画布、面板预算、
 // 精灵池过滤口径与一次性输出完全一致。
 //
-// RawMode 守卫生命周期契约与 play.rs 相同：run() 内创建、随作用域 Drop，
-// 正常返回 / break / panic unwind 全覆盖；q/Esc/Ctrl-C 退出、r 重 roll、
-// stdin EOF（终端关闭）自动收场，退出前还原主屏不污染 scrollback。
+// RawMode 守卫生命周期契约与 play.rs 相同：run() 内创建、随作用域 Drop
+// （先 tcflush 清未读输入再还原 termios），正常返回 / break / panic unwind
+// 全覆盖；q/Q/Esc/Ctrl-C 退出、r/R 重 roll、stdin EOF（终端关闭）自动收场，
+// 退出前还原主屏不污染 scrollback。
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
