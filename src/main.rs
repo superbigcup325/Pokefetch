@@ -366,7 +366,7 @@ fn main() {
             canvas,
             center,
             no_panel,
-            show_title: title.unwrap_or(no_panel),
+            show_title: title.unwrap_or(false),
             budget_enabled: modules.is_none(),
             module_names,
         };
@@ -414,9 +414,8 @@ fn main() {
 
     // 面板只挂 stdout 直打印路径；--raw / 写文件（含 --logo-cache）恒为纯精灵
     let panel = on_stdout && !no_panel && !raw;
-    // 名字行：--raw 恒隐藏；stdout 面板模式默认隐藏；纯精灵 stdout 与写文件
-    // 回显默认显示；--title/--no-title 显式覆盖
-    let show_title = title.unwrap_or(!raw && !(on_stdout && panel));
+    // 名字行默认隐藏（纯精灵/面板模式都不带），显式 --title 才显示；--raw 恒不带
+    let show_title = !raw && title.unwrap_or(false);
 
     // 面板行只收集一次，静态打印与动画逐帧复用（动画时面板保持静态）
     let panel_rows_v = if panel {

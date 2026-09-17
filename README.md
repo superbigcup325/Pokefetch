@@ -17,17 +17,21 @@ pokefetch -n charizard -f mega-x   # 指定 + 形态
 pokefetch -r 1-3       # 1~3 代随机
 pokefetch --random-by-names pikachu,gengar  # 名单内随机
 pokefetch -s -b --no-panel  # 闪光 + 大图纯精灵
+pokefetch --watch      # 常驻重绘（见下文）
 pokefetch --animated    # 动画播放（需动画数据，见下节）
 pokefetch --animated --loops 3  # 播 3 轮后退出（省缺无限循环，按 q 退出）
+pokefetch -l           # 列出全部可用名字
 ```
 
 1/128 的 shiny 概率只在随机模式（默认 / `-r` / `--random-by-names`）生效；
 `-n` 指定名字时不掷点、恒为普通色，需要闪光显式加 `-s`。
 
+精灵名字行默认隐藏，需要时加 `--title` 显示；`--raw` 恒不带名字行。
+
 面板信息读自 /proc、/sys 与环境变量，零外部依赖，取不到的行自动跳过。
 默认为精选模块集，`--modules os,gpu,memory,…` 可任意挑选
 （可用：os host board bios kernel uptime packages shell de wm wmtheme theme icons
-font cursor terminal gpu cpu memory swap disk localip battery load locale）。
+font cursor terminal gpu cpu memory swap disk localip localip-all battery load locale）。
 
 ## 接入 fastfetch
 
@@ -50,22 +54,32 @@ fastfetch 面板列位由此稳定；`--center` 可让精灵在画布内居中�
 ## 动画播放
 
 `--animated` 播放精灵的逐帧动画（Showdown 对战动画转译，帧率取素材原生 30–40ms）。
-面板与名字行保持静态，只有精灵区域逐帧重绘；随机池、画布、`--center` 等行为与静态一致。
+面板与名字行内容保持不变（播放时随精灵区域整行覆写，不闪烁）；
+随机池、画布、`--center` 等行为与静态一致。
 
-动画数据不进二进制，运行时按以下顺序查找 `anim.bin`，找不到、损坏或该精灵
-没有动画帧时自动回退静态图：
-
-1. 环境变量 `POKEFETCH_ANIM` 指定的路径
-2. `$XDG_DATA_HOME/pokefetch/anim.bin`（默认 `~/.local/share/pokefetch/anim.bin`）
-
-数据文件由维护命令从帧目录打包生成：
+动画数据不进二进制。设置了环境变量 `POKEFETCH_ANIM` 时只使用它指向的
+`anim.bin`；未设置才查找 `$XDG_DATA_HOME/pokefetch/anim.bin`
+（默认 `~/.local/share/pokefetch/anim.bin`）。数据缺失、损坏或该精灵
+没有动画帧时自动回退静态图并在 stderr 提示：
 
 ```
 pokefetch --anim-pack <帧目录> -o anim.bin
 ```
 
+帧目录布局为 `<帧目录>/<精灵名>/{regular,shiny}/NNNN.ans`（各变体目录内
+附 `meta` 文件注明帧延时），`--anim-pack` 需传入包含全部精灵的上级目录。
+打包完成后按上面两条路径之一放置即可（如 `-o ~/.local/share/pokefetch/anim.bin`）。
+
 仅 stdout 直连终端时播放；`--raw`/`-o`/`--logo-cache`（fastfetch 对接路径）
 与 `--animated` 互斥，恒为静态单帧输出。
+
+## 常驻重绘
+
+`--watch` 进入常驻模式：精灵 + 面板常驻当前窗口，终端尺寸变化（含平铺/
+全屏切换引起的 resize）即整帧重排，随机池过滤与面板布局都按新宽度重算；
+按 `r` 重掷一只（shiny 同分布），`q`/`Esc`/`Ctrl-C` 退出，退出时还原终端
+主屏。需 stdin/stdout 直连终端，与 `--raw`/`-o`/`--logo-cache`/`--animated`
+互斥。
 
 ## 构建
 

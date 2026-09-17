@@ -124,11 +124,11 @@ pub(crate) struct Args {
     #[arg(long, value_name = "列表")]
     pub(crate) modules: Option<String>,
 
-    /// 显示精灵名字行（面板模式下默认不显示）
+    /// 显示精灵名字行（默认隐藏；--raw 恒不带）
     #[arg(long, conflicts_with = "no_title")]
     pub(crate) title: bool,
 
-    /// 不显示名字行（纯精灵模式下默认显示）
+    /// 不显示名字行（默认即隐藏，为兼容保留）
     #[arg(long)]
     pub(crate) no_title: bool,
 
