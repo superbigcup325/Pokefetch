@@ -18,6 +18,9 @@ static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprites.bin"));
 // -f/--form 的形态表：build.rs 从 assets/pokemon.json 生成
 include!(concat!(env!("OUT_DIR"), "/forms_gen.rs"));
 
+// -r 随机的平行形态表：build.rs 按"野外可自然遭遇"规则从 pokemon.json 筛选
+include!(concat!(env!("OUT_DIR"), "/parallel_forms_gen.rs"));
+
 use std::io::Read;
 
 use canvas::{compose, max_visible_width, pad_canvas, resolve_canvas};
@@ -151,6 +154,18 @@ pub(crate) fn dex_number(name: &str) -> Option<usize> {
         let (base, _) = cur.rsplit_once('-')?;
         cur = base;
     }
+}
+
+/// -r 随机的展开组：基础名本名 + 参与均分的平行形态（PARALLEL_FORMS 由
+/// build.rs 按"野外可自然遭遇"规则生成，条目少线性扫即可）。
+/// 闪光掷点与本函数无关——先定 shiny 再选精灵，两者独立，等价于
+/// "形态定完后叠加 1/128 闪光概率"
+pub(crate) fn random_group(name: &str) -> Vec<String> {
+    let mut group = vec![name.to_owned()];
+    if let Some((_, forms)) = PARALLEL_FORMS.iter().find(|(n, _)| *n == name) {
+        group.extend(forms.iter().map(|f| f.to_string()));
+    }
+    group
 }
 
 /// 默认 logo 缓存路径：$XDG_CACHE_HOME/pokefetch/logo.ans
@@ -331,20 +346,32 @@ fn main() {
                     };
                     all[lo - 1..hi].to_vec()
                 };
-                // 只 roll 终端放得下的精灵；极端窄终端全放不下时放弃过滤兜底
+                // 只 roll 终端放得下的精灵（本名或任一参与平行形态放得下即
+                // 保留）；极端窄终端全放不下时放弃过滤兜底
                 if let Some(cols) = term_cols {
                     let fits: Vec<&str> = pool
                         .iter()
                         .copied()
                         .filter(|n| {
-                            sprite_cols(&index, size, variant, n).is_some_and(|w| w <= cols)
+                            random_group(n).iter().any(|g| {
+                                sprite_cols(&index, size, variant, g).is_some_and(|w| w <= cols)
+                            })
                         })
                         .collect();
                     if !fits.is_empty() {
                         pool = fits;
                     }
                 }
-                (pool[rng.below(pool.len())].to_owned(), shiny)
+                // roll 基础名后在其随机组（本名+平行形态）内均分——模拟游戏
+                // 野外刷新：地区/季节等平行形态与本名等概率，mega 等战斗形态
+                // 不参与；组内再剔除放不下的形态（pool 过滤已保证组非空）
+                let mut group = random_group(pool[rng.below(pool.len())]);
+                if let Some(cols) = term_cols {
+                    group.retain(|g| {
+                        sprite_cols(&index, size, variant, g).is_some_and(|w| w <= cols)
+                    });
+                }
+                (group[rng.below(group.len())].to_owned(), shiny)
             }
         };
         let ansi = sprite_ansi(&index, &name, shiny, big);
@@ -503,5 +530,52 @@ mod tests {
         assert_eq!(dex_number("ho-oh"), Some(250));
         assert_eq!(dex_number("porygon-z"), Some(474));
         assert_eq!(dex_number("不存在"), None);
+    }
+
+    #[test]
+    fn random_groups_parallel_forms() {
+        // mega/gmax/活动分发不参与随机：charizard 全家战斗形态、pikachu 帽子系
+        assert_eq!(random_group("charizard"), vec!["charizard".to_owned()]);
+        assert_eq!(random_group("pikachu"), vec!["pikachu".to_owned()]);
+        assert_eq!(random_group("rotom"), vec!["rotom".to_owned()]);
+        assert_eq!(random_group("alcremie"), vec!["alcremie".to_owned()]);
+        // 地区形态参与均分
+        let t = random_group("tauros");
+        assert_eq!(t.len(), 4);
+        assert!(t.contains(&"tauros-paldea-combat-breed".to_owned()));
+        assert!(random_group("vulpix").contains(&"vulpix-alola".to_owned()));
+        // 季节/天气/花色/遗迹字母
+        assert!(random_group("deerling").contains(&"deerling-summer".to_owned()));
+        assert!(random_group("castform").contains(&"castform-rainy".to_owned()));
+        assert_eq!(random_group("unown").len(), 28);
+        let flo = random_group("floette");
+        assert!(flo.contains(&"floette-blue".to_owned()));
+        // eternal（事件专属）与 mega 不进 floette 的组
+        assert!(
+            !flo.iter()
+                .any(|f| f.contains("eternal") || f.contains("mega"))
+        );
+        // 性别形态
+        assert!(random_group("basculegion").contains(&"basculegion-female".to_owned()));
+        // 原生带连字符的基础名不受形态前缀影响
+        assert_eq!(random_group("tapu-koko"), vec!["tapu-koko".to_owned()]);
+    }
+
+    #[test]
+    fn parallel_forms_have_assets() {
+        // build.rs 已按四组合素材齐备过滤，此处双保险：表内形态必可渲染
+        let index = sprites_index();
+        for (_, forms) in PARALLEL_FORMS.iter() {
+            for f in forms.iter() {
+                for size in ["small", "large"] {
+                    for variant in ["regular", "shiny"] {
+                        assert!(
+                            sprite_cols(&index, size, variant, f).is_some(),
+                            "{size}/{variant}/{f} 缺素材"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
