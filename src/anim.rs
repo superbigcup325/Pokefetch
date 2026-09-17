@@ -367,7 +367,13 @@ pub(crate) fn pack(dir: &Path, out: &Path) {
         }
     }
     if items.is_empty() {
-        die(&format!("{dir:?} 下没有可打包的动画条目"));
+        // 常见误用：把单精灵目录（其下直接是 regular/shiny）当成了帧目录
+        let hint = if dir.join("regular").is_dir() || dir.join("shiny").is_dir() {
+            "；当前目录下直接是 regular/shiny，像是单精灵目录——帧目录应为包含全部精灵的上级目录"
+        } else {
+            "（帧目录布局：<帧目录>/<精灵名>/{regular,shiny}/NNNN.ans + meta）"
+        };
+        die(&format!("{dir:?} 下没有可打包的动画条目{hint}"));
     }
     items.sort_by(|a, b| a.key.cmp(&b.key));
 
