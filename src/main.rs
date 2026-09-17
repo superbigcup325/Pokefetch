@@ -175,6 +175,10 @@ enum Dest {
 }
 
 fn main() {
+    // 管道下游提前关闭（pokefetch … | head）时按 Unix 惯例被 SIGPIPE 终止；
+    // Rust 运行时默认忽略 SIGPIPE，write 报 EPIPE 后 println! 直接 panic 刷回溯
+    ffi::restore_sigpipe_default();
+
     let args = cli::parse_args();
 
     // 维护命令：帧目录 → anim.bin（与常规输出互斥，打完即走）

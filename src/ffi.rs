@@ -57,6 +57,23 @@ unsafe extern "C" {
     pub fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
     pub fn tcsetattr(fd: i32, actions: i32, termios: *const Termios) -> i32;
     pub fn sigaction(signum: i32, act: *const SigAction, old: *mut SigAction) -> i32;
+    pub fn signal(signum: i32, handler: usize) -> usize;
+}
+
+/// SIGPIPE 的默认处置（SIG_DFL）：进程收到信号即终止
+const SIG_DFL: usize = 0;
+
+/// SIGPIPE（x86_64 Linux）
+pub const SIGPIPE: i32 = 13;
+
+/// 恢复 SIGPIPE 默认处置。Rust 运行时启动时忽略 SIGPIPE，下游提前关闭的
+/// 管道（pokefetch … | head）会让 write 返回 EPIPE、println! 直接 panic 刷
+/// 回溯；恢复后进程按 Unix 惯例被 SIGPIPE 终止（shell 报 141）。须在
+/// main 最开头调用
+pub fn restore_sigpipe_default() {
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
 }
 
 /// struct termios（x86_64 Linux）
