@@ -199,6 +199,9 @@ fn main() {
     if args.canvas.is_some_and(|c| c > 1000) {
         die("--canvas 需要一个 0~1000 的整数");
     }
+    if args.loops.is_some_and(|l| l == 0) {
+        die("--loops 轮数至少为 1");
+    }
 
     let Args {
         name,
@@ -237,11 +240,16 @@ fn main() {
         Some(spec) => Some(spec.to_string()),
     };
     let by_names: Option<Vec<String>> = random_by_names.as_deref().map(|s| {
-        s.split(',')
+        let list: Vec<String> = s
+            .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .collect()
+            .collect();
+        if list.is_empty() {
+            die("--random-by-names 需要名字列表，如 pikachu,gengar");
+        }
+        list
     });
     let modules: Option<Vec<String>> = modules.map(|s| {
         let list: Vec<String> = s

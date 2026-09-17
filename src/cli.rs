@@ -76,11 +76,12 @@ fn help_tail() -> String {
 #[derive(Parser)]
 #[command(
     name = "pokefetch",
+    version,
     about = "终端里的宝可梦 fetch：精灵字符画 + 系统信息面板"
 )]
 pub(crate) struct Args {
     /// 指定宝可梦（pikachu；形态配 -f，或直接传全名 charizard-mega-x）
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "random")]
     pub(crate) name: Option<String>,
 
     /// 随机一只，可附加世代: 1 / 1-3 / 1,3,6
