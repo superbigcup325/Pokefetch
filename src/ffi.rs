@@ -56,6 +56,7 @@ unsafe extern "C" {
     pub fn isatty(fd: i32) -> i32;
     pub fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
     pub fn tcsetattr(fd: i32, actions: i32, termios: *const Termios) -> i32;
+    pub fn tcflush(fd: i32, queue_selector: i32) -> i32;
     pub fn sigaction(signum: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     pub fn signal(signum: i32, handler: usize) -> usize;
 }
@@ -90,6 +91,7 @@ pub struct Termios {
 }
 
 pub const TCSANOW: i32 = 0;
+pub const TCIFLUSH: i32 = 0;
 pub const ICANON: u32 = 0x2;
 pub const ECHO: u32 = 0x8;
 pub const ISIG: u32 = 0x1;
@@ -104,7 +106,8 @@ pub fn stdin_is_tty() -> bool {
     unsafe { isatty(0) == 1 }
 }
 
-/// stdin 原始模式守卫：关掉规范模式与回显（c_lflag），Drop 时恢复原 termios。
+/// stdin 原始模式守卫：关掉规范模式与回显（c_lflag），Drop 时先 tcflush
+/// 丢弃未读输入再恢复原 termios（退出键之后的队列残留不得漏给 shell）。
 /// 两种读法：enable() 非阻塞轮询（VMIN=0，动画播放）；enable_blocking()
 /// 阻塞读（VMIN=1，--watch 专用，0 返回即真 EOF、信号打断返回 EINTR）。
 /// Drop 顺序契约见 play.rs / watch.rs 模块头
@@ -173,7 +176,13 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        unsafe { tcsetattr(0, TCSANOW, &self.saved) };
+        unsafe {
+            // 还原前丢弃未读输入：读到退出键的那一刻队列里常还有后续字节
+            // （方向键转义序列的剩余段、快速连打的余键），不清会漏给退出后
+            // 的 shell 当命令行
+            tcflush(0, TCIFLUSH);
+            tcsetattr(0, TCSANOW, &self.saved);
+        }
     }
 }
 
